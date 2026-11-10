@@ -83,6 +83,29 @@ and reactivate changed configuration.
   `Automatedbackup_YYYYMMDD_HHMMSS` folders are created.
 - **Generate SHA256 Hashes**: records hashes for supported backup artifacts.
 
+### External backup copy
+
+The primary backup destination must be a permanent local folder or accessible
+UNC path. A removable disk is configured separately with **Copy completed
+backups to a removable external drive**.
+
+MiChecklist always finishes and verifies the checklist locally first. It then
+queues an independent `external_backup_copy` job. If the registered disk is not
+connected, the local checklist remains successful and the copy waits without
+blocking later schedules. The disk is matched by volume serial number, so a
+changed drive letter is handled automatically.
+
+When the disk returns, MiChecklist copies into a job-specific partial path,
+verifies file sizes and SHA-256 hashes, and publishes the final copy atomically.
+An interrupted partial copy is removed and only the copy is retried; SQL, IIS,
+service, folder, and cleanup operations are not rerun. Email notifications are
+sent after local completion, when the external copy starts, and after the copy
+is verified and safe to remove.
+
+With **Copy only the latest verified backup**, a newer local backup supersedes
+older pending copy jobs. Local retention protects every backup still awaiting
+external verification.
+
 A SharePoint or OneDrive web URL is not a filesystem destination. Use a local
 synchronized folder or a supported upload integration. Mapped drive letters are
 not reliable for a service; use a UNC path instead.

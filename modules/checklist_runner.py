@@ -21,7 +21,6 @@ from utils.hashing import hash_file
 from utils.logger import get_logger
 from utils.paths import get_app_dir
 from utils.compression import compress_file_to_zip
-from utils.external_drive import ExternalDriveUnavailable, resolve_external_destination
 
 
 TaskCallback = Callable[[int, str], None]
@@ -47,14 +46,6 @@ class ChecklistRunner:
         """Return blocking configuration errors and non-blocking skip warnings."""
         errors: list[str] = []
         warnings: list[str] = []
-
-        external = self.config_manager.get_section("external_destination")
-        if external.get("enabled", False):
-            try:
-                current_destination = resolve_external_destination(external)
-                self.config_manager.set("general", "backup_root_folder", str(current_destination))
-            except ExternalDriveUnavailable as exc:
-                errors.append(str(exc))
 
         backup_root = str(self.config_manager.get("general", "backup_root_folder", "")).strip()
         if not backup_root:

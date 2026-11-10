@@ -34,6 +34,8 @@ def _status_style(status: str) -> tuple[str, str, str]:
         return "Completed", "#067647", "#ecfdf3"
     if "skip" in normalized:
         return normalized.title(), "#344054", "#f2f4f7"
+    if normalized in {"pending", "queued", "waiting external", "waiting_external"}:
+        return "Pending", "#175cd3", "#eff8ff"
     if "cancel" in normalized:
         return normalized.title(), "#b54708", "#fffaeb"
     return normalized.title(), "#b42318", "#fef3f2"

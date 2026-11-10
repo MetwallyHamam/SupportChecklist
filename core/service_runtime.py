@@ -13,6 +13,7 @@ from core.notifications import EmailNotifier
 from core.retention import apply_retention
 from core.scheduled_jobs import ScheduledJobStore
 from core.script_runner import run_script
+from core.external_copy import copy_verified_backup
 from core.backup_lifecycle import (
     is_legacy_interrupted_scheduled_checklist,
     remove_incomplete_backups,
@@ -48,22 +49,16 @@ class ServiceRuntime:
 
     @staticmethod
     def _uses_backup_destination(job: dict) -> bool:
-        return job.get("type") in {
-            "checklist", "database_backup", "folder_backup", "iis_backup", "service_backup",
-        }
+        return job.get("type") == "external_backup_copy"
 
     def _external_settings(self) -> dict:
-        return self.config.get_section("external_destination")
+        return self.config.get_section("external_copy")
 
     def _activate_external_destination(self) -> Path | None:
         settings = self._external_settings()
         if not settings.get("enabled", False):
             return None
-        destination = resolve_external_destination(settings)
-        # Resolve the current drive letter in memory only. The saved serial ID
-        # remains authoritative across reconnects and drive-letter changes.
-        self.config.set("general", "backup_root_folder", str(destination))
-        return destination
+        return resolve_external_destination(settings)
 
     def _external_notice_due(self, job: dict) -> bool:
         last_value = str(job.get("last_external_notice_at", "")).strip()
@@ -81,20 +76,20 @@ class ServiceRuntime:
             return
         label = str(self._external_settings().get("volume_label", "")).strip() or "configured external drive"
         notifier.send(
-            "[Support Checklist] External backup drive required",
-            f"MiChecklist is waiting to run job {job.get('id', '')}.\n\n"
+            "[Support Checklist] External backup copy pending",
+            f"The checklist completed locally. MiChecklist is waiting to copy the verified "
+            f"backup for job {job.get('id', '')}.\n\n"
             f"Please connect the external backup drive '{label}'.\n"
             f"Reason: {reason}\n\n"
-            "The job is waiting and has not been marked as failed. MiChecklist will check "
-            "again automatically.",
+            "The local backup is safe. MiChecklist will retry only the external copy automatically.",
         )
         self.queue.mark_external_notice(str(job.get("id", "")))
 
     def _notify_external_ready(self, job: dict, notifier: EmailNotifier, destination: Path) -> None:
         notifier.send(
-            "[Support Checklist] External drive detected - backup starting",
+            "[Support Checklist] External drive detected - copy starting",
             f"The configured external drive is available at {destination}.\n\n"
-            f"MiChecklist is starting or resuming job {job.get('id', '')}. Please do not "
+            f"MiChecklist is starting or resuming external copy job {job.get('id', '')}. Please do not "
             "disconnect the drive until the completion email confirms it is safe to remove.",
         )
 
@@ -193,10 +188,40 @@ class ServiceRuntime:
             if not result or result[0].get("status") not in {"Completed", "Skipped"}:
                 raise RuntimeError(str(result[0].get("detail", "Cleanup failed")))
             return {"status": "Completed", "cleanup": result[0]}
+        if job_type == "external_backup_copy":
+            destination = self._activate_external_destination()
+            if destination is None:
+                raise ExternalDriveUnavailable("External copy is disabled.")
+            copied = copy_verified_backup(
+                Path(str(payload.get("source_path", ""))), destination,
+                str(job.get("id", "external-copy")),
+            )
+            return {
+                "status": "Completed",
+                "backup_path": copied["destination"],
+                "tasks": [{
+                    "task": "External Backup Copy",
+                    "status": "Completed",
+                    "detail": (
+                        f"{copied['files']} files verified at {copied['destination']}. "
+                        "The external drive can now be safely removed."
+                    ),
+                }],
+                "external_copy": copied,
+            }
         raise ValueError(f"Unsupported service job type: {job_type}")
 
     def process_once(self) -> bool:
         self.config.load_config(create_if_missing=False)
+        self.queue.migrate_legacy_external_waits()
+        if self._external_settings().get("migration_requires_local_destination", False):
+            message = (
+                "External-drive settings were migrated. Select a permanent local backup root "
+                "and save External Copy settings before schedules can continue."
+            )
+            self.write_heartbeat("configuration_required", error=message)
+            self.logger.warning(message)
+            return False
         default_job_id = enqueue_default_checklist_if_due(self.config, self.queue)
         if default_job_id:
             self.logger.info("Queued due default checklist job %s", default_job_id)
@@ -227,9 +252,11 @@ class ServiceRuntime:
                     self.logger.info("Requeued %d job(s) after the external drive returned.", resumed)
 
         notifier = EmailNotifier(self.config.get_section("email"))
+        waiting_external_copy = False
         if external_error:
             for waiting_job in self.queue.load():
                 if waiting_job.get("status") == "waiting_external":
+                    waiting_external_copy = True
                     try:
                         self._notify_external_missing(waiting_job, notifier, str(external_error))
                     except Exception:
@@ -237,7 +264,10 @@ class ServiceRuntime:
 
         job = self.queue.claim_next()
         if not job:
-            self.write_heartbeat("waiting_external" if external_error else "idle", error=str(external_error or ""))
+            self.write_heartbeat(
+                "external_copy_pending" if external_error and waiting_external_copy else "idle",
+                error=str(external_error or "") if waiting_external_copy else "",
+            )
             return False
         if external_error and self._uses_backup_destination(job):
             self.queue.defer_for_external_drive(job["id"], str(external_error))
@@ -256,10 +286,11 @@ class ServiceRuntime:
             job["id"], job.get("type", ""), job.get("attempts", 0),
         )
         job_payload = job.get("payload", {})
-        if job_payload.get("external_reconnected") and external_destination:
+        if job.get("type") == "external_backup_copy" and external_destination:
             try:
                 self._notify_external_ready(job, notifier, external_destination)
-                self.queue.update_payload(job["id"], {"external_reconnected": False})
+                if job_payload.get("external_reconnected"):
+                    self.queue.update_payload(job["id"], {"external_reconnected": False})
             except Exception:
                 self.logger.exception("External-drive detected email failed")
         monitor_stop = threading.Event()
@@ -280,12 +311,22 @@ class ServiceRuntime:
         monitor_thread.start()
         try:
             result = self.execute(job)
-            if external_destination and job.get("type") == "checklist":
+            external_copy_job_id = ""
+            if (
+                self._external_settings().get("enabled", False)
+                and job.get("type") in {"checklist", "database_backup", "folder_backup", "iis_backup", "service_backup"}
+                and result.get("backup_path")
+            ):
+                external_copy_job_id = self.queue.enqueue_external_copy(
+                    str(result["backup_path"]), str(job.get("id", "")),
+                    latest_only=bool(self._external_settings().get("copy_latest_only", True)),
+                )
                 result.setdefault("tasks", []).append({
-                    "task": "External Drive",
-                    "status": "Completed",
-                    "detail": "Backup verified. The external drive can now be safely removed.",
+                    "task": "External Backup Copy",
+                    "status": "Pending",
+                    "detail": "Local backup is complete and verified; external copy is queued.",
                 })
+                result["external_copy_job_id"] = external_copy_job_id
             if (
                 job.get("type") == "checklist"
                 and self.queue._is_scheduled_execution(job)
@@ -294,6 +335,7 @@ class ServiceRuntime:
                 backup_path = Path(str(result["backup_path"])) if result.get("backup_path") else None
                 deleted = delete_previous_automated_backups(
                     self.config, keep_path=backup_path,
+                    protected_paths=self.queue.pending_external_source_paths(),
                 )
                 result["previous_backups_deleted"] = deleted
                 self.logger.info(
@@ -320,6 +362,7 @@ class ServiceRuntime:
                         Path(root).expanduser(),
                         max_age_days=int(retention.get("max_age_days", 90)),
                         min_keep=int(retention.get("minimum_successful_backups", 1)),
+                        protected_paths=self.queue.pending_external_source_paths(),
                     )
             try:
                 notifier.notify_result(job, "completed", result=result)

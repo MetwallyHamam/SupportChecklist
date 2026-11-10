@@ -51,8 +51,12 @@ class ConfigTab(QWidget):
         self.backup_root_input = QLineEdit()
         self.backup_browse_button = QPushButton("Browse")
         self.external_destination_checkbox = QCheckBox(
-            "Destination is a removable external drive"
+            "Copy completed backups to a removable external drive"
         )
+        self.external_destination_input = QLineEdit()
+        self.external_destination_input.setPlaceholderText("Folder on the registered external drive")
+        self.external_browse_button = QPushButton("Browse")
+        self.external_copy_latest_checkbox = QCheckBox("Copy only the latest verified backup")
         self.external_check_minutes = QSpinBox()
         self.external_check_minutes.setRange(1, 1440)
         self.external_check_minutes.setSuffix(" minutes")
@@ -226,6 +230,11 @@ class ConfigTab(QWidget):
         backup_layout.addWidget(self.backup_browse_button)
         general_layout.addRow("Backup Root Folder:", backup_layout)
         general_layout.addRow(self.external_destination_checkbox)
+        external_path_layout = QHBoxLayout()
+        external_path_layout.addWidget(self.external_destination_input)
+        external_path_layout.addWidget(self.external_browse_button)
+        general_layout.addRow("External Copy Folder:", external_path_layout)
+        general_layout.addRow(self.external_copy_latest_checkbox)
         general_layout.addRow("Drive check interval:", self.external_check_minutes)
         general_layout.addRow("Reminder interval:", self.external_reminder_minutes)
         general_layout.addRow(self.external_identity_label)
@@ -574,6 +583,7 @@ class ConfigTab(QWidget):
 
     def attach_signals(self) -> None:
         self.backup_browse_button.clicked.connect(self.on_browse_backup_root)
+        self.external_browse_button.clicked.connect(self.on_browse_external_root)
         self.add_folder_button.clicked.connect(self.on_add_folder)
         self.edit_folder_button.clicked.connect(self.on_edit_folder)
         self.toggle_folder_button.clicked.connect(self.on_toggle_folder)
@@ -633,8 +643,12 @@ class ConfigTab(QWidget):
     def load_settings(self) -> None:
         general = self.config_manager.get_section("general")
         self.backup_root_input.setText(str(general.get("backup_root_folder", "")))
-        external = self.config_manager.get_section("external_destination")
-        self.external_destination_checkbox.setChecked(bool(external.get("enabled", False)))
+        external = self.config_manager.get_section("external_copy")
+        self.external_destination_checkbox.setChecked(bool(
+            external.get("enabled", False) or external.get("migration_requires_local_destination", False)
+        ))
+        self.external_destination_input.setText(str(external.get("configured_path", "")))
+        self.external_copy_latest_checkbox.setChecked(bool(external.get("copy_latest_only", True)))
         self.external_check_minutes.setValue(int(external.get("check_interval_minutes", 5)))
         self.external_reminder_minutes.setValue(int(external.get("reminder_interval_minutes", 120)))
         serial = str(external.get("volume_serial", "")).strip()
@@ -643,6 +657,11 @@ class ConfigTab(QWidget):
             f"External drive identity: {label or 'Unnamed'} ({serial})"
             if serial else "External drive identity: Not registered"
         )
+        if external.get("migration_requires_local_destination", False):
+            self.external_identity_label.setText(
+                "Migration required: choose a permanent local Backup Root Folder, then confirm "
+                "or disable external copying and save General Settings."
+            )
         self.compression_checkbox.setChecked(bool(general.get("compression_enabled", True)))
         self.hash_checkbox.setChecked(bool(general.get("generate_sha256_hashes", True)))
         self.incremental_checkbox.setChecked(bool(general.get("incremental_backups", True)))
@@ -1060,6 +1079,13 @@ class ConfigTab(QWidget):
         selected = QFileDialog.getExistingDirectory(self, "Select Backup Root Folder")
         if selected:
             self.backup_root_input.setText(selected)
+
+    def on_browse_external_root(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, "Select External Copy Folder", self.external_destination_input.text(),
+        )
+        if selected:
+            self.external_destination_input.setText(selected)
 
     def on_add_folder(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -1582,19 +1608,21 @@ class ConfigTab(QWidget):
         if not backup_root:
             raise ValueError("Backup root folder must be configured.")
         self.config_manager.set("general", "backup_root_folder", backup_root)
-        external = self.config_manager.get_section("external_destination")
+        external = self.config_manager.get_section("external_copy")
         external["enabled"] = self.external_destination_checkbox.isChecked()
+        external["copy_latest_only"] = self.external_copy_latest_checkbox.isChecked()
         external["check_interval_minutes"] = self.external_check_minutes.value()
         external["reminder_interval_minutes"] = self.external_reminder_minutes.value()
+        external["migration_requires_local_destination"] = False
         if self.external_destination_checkbox.isChecked():
             try:
-                external.update(capture_external_destination(backup_root))
+                external.update(capture_external_destination(self.external_destination_input.text().strip()))
             except Exception as exc:
                 raise ValueError(
                     "Connect the external drive and select its backup folder before saving: "
                     f"{exc}"
                 ) from exc
-        self.config_manager.data["external_destination"] = external
+        self.config_manager.data["external_copy"] = external
         self.config_manager.set("general", "compression_enabled", self.compression_checkbox.isChecked())
         self.config_manager.set("general", "generate_sha256_hashes", self.hash_checkbox.isChecked())
 

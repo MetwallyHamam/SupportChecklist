@@ -122,11 +122,22 @@ class StartupGuide(QWizard):
         layout.addWidget(QLabel("Backup root folder:"))
         layout.addLayout(row)
         layout.addWidget(QLabel("Recommended example: D:\\MiChecklistBackups"))
-        external = self.config_manager.get_section("external_destination")
+        external = self.config_manager.get_section("external_copy")
         self.external_destination_enabled = QCheckBox(
-            "This destination is on a removable external drive"
+            "Copy completed backups to a removable external drive"
         )
-        self.external_destination_enabled.setChecked(bool(external.get("enabled", False)))
+        self.external_destination_enabled.setChecked(bool(
+            external.get("enabled", False) or external.get("migration_requires_local_destination", False)
+        ))
+        self.external_destination_input = QLineEdit(str(external.get("configured_path", "")))
+        self.external_destination_input.setPlaceholderText("Select a folder on the external drive")
+        external_browse = QPushButton("Browse External Drive")
+        external_browse.clicked.connect(self._browse_external_destination)
+        external_path_row = QHBoxLayout()
+        external_path_row.addWidget(self.external_destination_input)
+        external_path_row.addWidget(external_browse)
+        self.external_copy_latest = QCheckBox("Copy only the latest verified backup")
+        self.external_copy_latest.setChecked(bool(external.get("copy_latest_only", True)))
         self.external_check_minutes = QSpinBox()
         self.external_check_minutes.setRange(1, 1440)
         self.external_check_minutes.setValue(int(external.get("check_interval_minutes", 5)))
@@ -137,13 +148,20 @@ class StartupGuide(QWizard):
         self.external_reminder_minutes.setSuffix(" minutes")
         external_form = QFormLayout()
         external_form.addRow(self.external_destination_enabled)
+        external_form.addRow("External copy folder:", external_path_row)
+        external_form.addRow(self.external_copy_latest)
         external_form.addRow("Check for drive every:", self.external_check_minutes)
         external_form.addRow("Missing-drive reminder every:", self.external_reminder_minutes)
         layout.addLayout(external_form)
         external_note = QLabel(
-            "MiChecklist identifies the drive by its volume serial number, waits when it is "
-            "disconnected, and resumes the interrupted backup phase after it returns."
+            "The checklist always completes and verifies in the local backup root first. "
+            "MiChecklist then copies the verified backup when this drive is available."
         )
+        if external.get("migration_requires_local_destination", False):
+            external_note.setText(
+                "Previous direct-to-external settings were preserved. Select a permanent local "
+                "backup root above, then confirm or disable the external copy option."
+            )
         external_note.setWordWrap(True)
         layout.addWidget(external_note)
         general = self.config_manager.get_section("general")
@@ -500,6 +518,14 @@ class StartupGuide(QWizard):
         if selected:
             self.destination_input.setText(selected)
 
+    def _browse_external_destination(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, "Select External Copy Folder",
+            self.external_destination_input.text() or str(Path.home()),
+        )
+        if selected:
+            self.external_destination_input.setText(selected)
+
     @staticmethod
     def _set_widgets_enabled(widgets: list, enabled: bool) -> None:
         for widget in widgets:
@@ -671,7 +697,7 @@ class StartupGuide(QWizard):
             return False
         if page == 1 and self.external_destination_enabled.isChecked():
             try:
-                capture_external_destination(self.destination_input.text().strip())
+                capture_external_destination(self.external_destination_input.text().strip())
             except Exception as exc:
                 QMessageBox.warning(
                     self, "External Backup Drive",
@@ -709,14 +735,16 @@ class StartupGuide(QWizard):
         if invalid_recipients:
             raise ValueError("Reception and Cc addresses must end with @millensys.com: " + ", ".join(invalid_recipients))
         self.config_manager.set("general", "backup_root_folder", self.destination_input.text().strip())
-        external_settings = self.config_manager.get_section("external_destination")
+        external_settings = self.config_manager.get_section("external_copy")
         external_settings["enabled"] = self.external_destination_enabled.isChecked()
+        external_settings["copy_latest_only"] = self.external_copy_latest.isChecked()
         external_settings["check_interval_minutes"] = self.external_check_minutes.value()
         external_settings["reminder_interval_minutes"] = self.external_reminder_minutes.value()
+        external_settings["migration_requires_local_destination"] = False
         if self.external_destination_enabled.isChecked():
-            identity = capture_external_destination(self.destination_input.text().strip())
+            identity = capture_external_destination(self.external_destination_input.text().strip())
             external_settings.update(identity)
-        self.config_manager.data["external_destination"] = external_settings
+        self.config_manager.data["external_copy"] = external_settings
         self.config_manager.set("general", "compression_enabled", self.compression_enabled.isChecked())
         self.config_manager.set("general", "generate_sha256_hashes", self.hashes_enabled.isChecked())
         self.config_manager.set("general", "incremental_backups", self.incremental_enabled.isChecked())

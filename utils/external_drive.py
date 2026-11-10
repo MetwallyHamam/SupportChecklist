@@ -39,6 +39,7 @@ def capture_external_destination(path: str | Path) -> dict[str, Any]:
         "volume_serial": serial,
         "volume_label": label,
         "relative_path": relative,
+        "configured_path": str(selected),
     }
 
 

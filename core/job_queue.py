@@ -105,6 +105,66 @@ class PersistentJobQueue:
             self.save(jobs)
             return job_id
 
+    def enqueue_external_copy(
+        self, source_path: str, source_job_id: str, latest_only: bool = True,
+    ) -> str:
+        """Queue a verified local backup for removable-drive replication."""
+        with self._process_lock():
+            jobs = self.load()
+            if latest_only:
+                for job in jobs:
+                    if (
+                        job.get("type") == "external_backup_copy"
+                        and job.get("status") in {"queued", "waiting_external", "interrupted", "failed"}
+                    ):
+                        job["status"] = "superseded"
+                        job["last_error"] = "A newer verified local backup replaced this pending copy."
+                        job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            job_id = uuid4().hex
+            jobs.append({
+                "id": job_id,
+                "type": "external_backup_copy",
+                "payload": {
+                    "source_path": source_path,
+                    "source_job_id": source_job_id,
+                    "latest_only": bool(latest_only),
+                },
+                "status": "queued",
+                "attempts": 0,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                "last_error": "",
+            })
+            self.save(jobs)
+            return job_id
+
+    def pending_external_source_paths(self) -> set[Path]:
+        protected: set[Path] = set()
+        for job in self.load():
+            if (
+                job.get("type") == "external_backup_copy"
+                and job.get("status") in {"queued", "running", "waiting_external", "interrupted"}
+            ):
+                value = str((job.get("payload", {}) or {}).get("source_path", "")).strip()
+                if value:
+                    protected.add(Path(value).expanduser().resolve())
+        return protected
+
+    def migrate_legacy_external_waits(self) -> int:
+        """Let checklists deferred by the former direct-drive design run locally."""
+        with self._process_lock():
+            jobs = self.load()
+            migrated = 0
+            for job in jobs:
+                if job.get("status") == "waiting_external" and job.get("type") != "external_backup_copy":
+                    job["status"] = "queued"
+                    job["last_error"] = ""
+                    job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                    migrated += 1
+            if migrated:
+                self.save(jobs)
+            return migrated
+
     def claim_next(self) -> dict | None:
         with self._process_lock():
             jobs = self.load()
@@ -168,7 +228,7 @@ class PersistentJobQueue:
             jobs = self.load()
             resumed = 0
             for job in jobs:
-                if job.get("status") != "waiting_external":
+                if job.get("status") != "waiting_external" or job.get("type") != "external_backup_copy":
                     continue
                 job["status"] = "queued"
                 job["last_error"] = ""

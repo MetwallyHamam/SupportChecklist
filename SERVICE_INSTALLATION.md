@@ -34,6 +34,11 @@ are migrated automatically on first use. Ensure
 the service account has access to SQL Server, IIS, source folders, and backup
 destinations. SMTP and SQL secrets are protected with Windows DPAPI.
 
+External-drive replication is handled by separate `external_backup_copy` jobs.
+The primary checklist completes against permanent local storage even when the
+removable disk is absent. Pending source backups are protected from retention
+until the external copy is verified or superseded by a newer backup.
+
 After upgrading from an earlier version, open the GUI and use **Save All
 Configuration** once. This migrates existing user-scoped DPAPI secrets to
 machine-scoped DPAPI so the LocalSystem service can decrypt them. Restrict the

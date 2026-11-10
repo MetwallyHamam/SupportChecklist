@@ -277,7 +277,10 @@ def scheduled_run_is_due(config_manager: ConfigManager, now: datetime | None = N
     return current_time >= next_due_time
 
 
-def delete_previous_automated_backups(config_manager: ConfigManager, keep_path: Path | None = None) -> int:
+def delete_previous_automated_backups(
+    config_manager: ConfigManager, keep_path: Path | None = None,
+    protected_paths: set[Path] | None = None,
+) -> int:
     """Remove old generations only after success, preserving the configured minimum."""
     if not config_manager.get("schedule", "delete_previous_automated_backups", False):
         return 0
@@ -293,6 +296,7 @@ def delete_previous_automated_backups(config_manager: ConfigManager, keep_path: 
     )
     minimum = max(1, int(config_manager.get("retention", "minimum_successful_backups", 1)))
     protected: set[Path] = {keep_path.resolve()}
+    protected.update(path.resolve() for path in (protected_paths or set()))
     for folder in folders:
         if len(protected) >= minimum:
             break

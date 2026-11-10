@@ -47,13 +47,16 @@ DEFAULT_CONFIG = {
         "poll_seconds": 5,
         "heartbeat_seconds": 30,
     },
-    "external_destination": {
+    "external_copy": {
         "enabled": False,
         "volume_serial": "",
         "volume_label": "",
         "relative_path": "",
+        "configured_path": "",
+        "copy_latest_only": True,
         "check_interval_minutes": 5,
         "reminder_interval_minutes": 120,
+        "migration_requires_local_destination": False,
     },
     "sql_server": {
         "backup_enabled": True,
@@ -123,6 +126,26 @@ def apply_missing_defaults(data: dict[str, Any], defaults: dict[str, Any]) -> bo
     return changed
 
 
+def migrate_external_destination(data: dict[str, Any]) -> bool:
+    """Convert the former direct-to-removable-drive mode into copy-after-backup settings."""
+    if "external_copy" in data or "external_destination" not in data:
+        return False
+    legacy = dict(data.get("external_destination", {}) or {})
+    was_enabled = bool(legacy.get("enabled", False))
+    data["external_copy"] = {
+        "enabled": False,
+        "volume_serial": str(legacy.get("volume_serial", "")),
+        "volume_label": str(legacy.get("volume_label", "")),
+        "relative_path": str(legacy.get("relative_path", "")),
+        "configured_path": str(data.get("general", {}).get("backup_root_folder", "")) if was_enabled else "",
+        "copy_latest_only": True,
+        "check_interval_minutes": int(legacy.get("check_interval_minutes", 5)),
+        "reminder_interval_minutes": int(legacy.get("reminder_interval_minutes", 120)),
+        "migration_requires_local_destination": was_enabled,
+    }
+    return True
+
+
 @dataclass
 class ConfigManager:
     config_path: Path = field(default_factory=get_default_config_path)
@@ -158,7 +181,8 @@ class ConfigManager:
                 except Exception:
                     section["password"] = ""
 
-        if apply_missing_defaults(self.data, DEFAULT_CONFIG):
+        migrated_external = migrate_external_destination(self.data)
+        if apply_missing_defaults(self.data, DEFAULT_CONFIG) or migrated_external:
             self.save_config()
 
         # Deployment automation can provide the SMTP app password once. It is
