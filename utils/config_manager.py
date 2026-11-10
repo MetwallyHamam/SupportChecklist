@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+import json
+import os
+from copy import deepcopy
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from .encryption import decrypt_password, encrypt_password
+from .paths import get_app_dir
+
+
+DEFAULT_CONFIG = {
+    "general": {
+        "backup_root_folder": "",
+        "compression_enabled": True,
+        "generate_sha256_hashes": True,
+        "incremental_backups": True,
+        "setup_completed": False,
+    },
+    "retention": {
+        "enabled": True,
+        "max_age_days": 90,
+        "minimum_successful_backups": 1,
+    },
+    "email": {
+        "enabled": True,
+        "smtp_server": "smtp.gmail.com",
+        "smtp_port": 587,
+        "use_tls": True,
+        "username": "millensysnotifications@gmail.com",
+        "sender_name": "MiChecklist",
+        "client_name": "",
+        "client_branch": "",
+        "client_server": "",
+        "client_comment": "",
+        "password": "uvec tcjb ikar mfun",
+        "to": [],
+        "cc": [],
+        "notify_success": True,
+        "notify_warning": True,
+        "notify_failure": True,
+        "notify_recovery": True,
+    },
+    "service": {
+        "poll_seconds": 5,
+        "heartbeat_seconds": 30,
+    },
+    "external_destination": {
+        "enabled": False,
+        "volume_serial": "",
+        "volume_label": "",
+        "relative_path": "",
+        "check_interval_minutes": 5,
+        "reminder_interval_minutes": 120,
+    },
+    "sql_server": {
+        "backup_enabled": True,
+        "archive_compression_enabled": True,
+        "server_name": "",
+        "instance_name": "",
+        "database_name": "",
+        "username": "",
+        "password": "",
+        "use_windows_auth": True,
+        "databases": [],
+    },
+    "iis": {
+        "backup_enabled": True,
+        "auto_detect_sites": True,
+        "include_iis_configuration": True,
+        "selected_sites": [],
+        "selected_apps": [],
+        "selected_cleanup_apps": [],
+        "selected_pools": [],
+    },
+    "services": {
+        "backup_enabled": True,
+        "service_search_filter": "Mi",
+        "selected_services": [],
+    },
+    "folder_backup": {
+        "folders": [],
+    },
+    "cleanup": {
+        "enabled": False,
+        "tasks": [],
+    },
+    "schedule": {
+        "enabled": False,
+        "mode": "weekly",
+        "weekday": "Sunday",
+        "days_interval": 7,
+        "start_time": "02:00",
+        "run_missed_schedule": True,
+        "run_at_startup": False,
+        "test_run_after_restart": False,
+        "delete_previous_automated_backups": True,
+        "hide_to_tray": True,
+    },
+}
+
+
+class ConfigError(Exception):
+    pass
+
+
+def get_default_config_path() -> Path:
+    """Return a writable config path beside the executable when packaged."""
+    return get_app_dir() / "config" / "config.json"
+
+
+def apply_missing_defaults(data: dict[str, Any], defaults: dict[str, Any]) -> bool:
+    """Populate absent config values while preserving user settings."""
+    changed = False
+    for key, default_value in defaults.items():
+        if key not in data:
+            data[key] = deepcopy(default_value)
+            changed = True
+        elif isinstance(default_value, dict) and isinstance(data[key], dict):
+            changed = apply_missing_defaults(data[key], default_value) or changed
+    return changed
+
+
+@dataclass
+class ConfigManager:
+    config_path: Path = field(default_factory=get_default_config_path)
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def load_config(self, create_if_missing: bool = True) -> None:
+        """Load configuration from JSON and decrypt sensitive values."""
+        if not self.config_path.exists():
+            if not create_if_missing:
+                raise ConfigError(
+                    f"Configuration file is missing: {self.config_path}. "
+                "Open MiChecklist, save all configuration, then restart the service."
+                )
+            self.data = deepcopy(DEFAULT_CONFIG)
+            self.save_config()
+            return
+
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as handle:
+                self.data = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise ConfigError(f"Unable to load configuration: {exc}") from exc
+
+        if not isinstance(self.data, dict):
+            raise ConfigError("Unable to load configuration: root value must be a JSON object")
+
+        for section_name in ("sql_server", "email"):
+            section = self.data.setdefault(section_name, {})
+            password = section.get("password")
+            if password:
+                try:
+                    section["password"] = decrypt_password(password)
+                except Exception:
+                    section["password"] = ""
+
+        if apply_missing_defaults(self.data, DEFAULT_CONFIG):
+            self.save_config()
+
+        # Deployment automation can provide the SMTP app password once. It is
+        # immediately persisted with machine-scoped DPAPI and removed from this
+        # process environment so interactive users never need to enter it.
+        provisioned_password = os.environ.pop(
+            "MICHECKLIST_SMTP_PASSWORD",
+            os.environ.pop("SUPPORTASSISTANT_SMTP_PASSWORD", ""),
+        )
+        email_section = self.data.setdefault("email", {})
+        if provisioned_password and not email_section.get("password"):
+            email_section["password"] = provisioned_password
+            self.save_config()
+
+    def save_config(self) -> None:
+        """Save configuration to JSON, encrypting sensitive values."""
+        output_data = deepcopy(self.data)
+        try:
+            for section_name in ("sql_server", "email"):
+                section = output_data.setdefault(section_name, {})
+                password = section.get("password", "")
+                if password:
+                    section["password"] = encrypt_password(password)
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_path, "w", encoding="utf-8") as handle:
+                json.dump(output_data, handle, indent=4)
+        except Exception as exc:
+            raise ConfigError(f"Unable to save configuration: {exc}") from exc
+
+    def get(self, section: str, key: str, default: Any = None) -> Any:
+        return self.data.get(section, {}).get(key, default)
+
+    def set(self, section: str, key: str, value: Any) -> None:
+        self.data.setdefault(section, {})[key] = value
+
+    def get_section(self, section: str) -> dict[str, Any]:
+        return self.data.get(section, {})

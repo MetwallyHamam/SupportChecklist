@@ -1,0 +1,33 @@
+# Generated application releases and packaged executables
+/dist/
+/build/
+/exe_first_run_test/
+/exe_runtime_folder_test/
+
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest*/
+.test-tmp*/
+
+# Runtime data (keep placeholder files)
+/logs/*
+!/logs/.gitkeep
+/reports/*
+!/reports/.gitkeep
+/backups/*
+!/backups/.gitkeep
+/queue/
+/service/health.json
+/history.json
+/support_checklist.lock
+
+# Machine-specific configuration can contain credentials and local paths
+/config/config.json
+
+# Generated presentation package; HTML/CSS/JS in its dist folder remain source
+/sites/michecklist-presentation/*.zip
+
+# Preserved metadata from the presentation's former standalone Sites repository
+/sites/michecklist-presentation/.sites-repository/

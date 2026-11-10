@@ -1,0 +1,117 @@
+Folder PATH listing for volume New Volume
+Volume serial number is 000000EA D264:7746
+D:.
+|   app.py
+|   app.spec
+|   history.json
+|   IIS_SITE_SELECTION_GUIDE.md
+|   project_structure.txt
+|   requirements.txt
+|   test_site_selection.py
+|   __init__.py
+|   
++---backups
+|       .gitkeep
+|       
++---build
+|   \---app
+|       |   Analysis-00.toc
+|       |   app.pkg
+|       |   base_library.zip
+|       |   EXE-00.toc
+|       |   PKG-00.toc
+|       |   PYZ-00.pyz
+|       |   PYZ-00.toc
+|       |   qt.conf
+|       |   warn-app.txt
+|       |   xref-app.html
+|       |   
+|       \---localpycs
+|               pyimod01_archive.pyc
+|               pyimod02_importers.pyc
+|               pyimod03_ctypes.pyc
+|               pyimod04_pywin32.pyc
+|               struct.pyc
+|               
++---config
+|       config.json
+|       
++---dist
+|       app.exe
+|       
++---gui
+|   |   config_tab.py
+|   |   dashboard_tab.py
+|   |   history_tab.py
+|   |   logs_tab.py
+|   |   main_window.py
+|   |   __init__.py
+|   |   
+|   \---__pycache__
+|           config_tab.cpython-314.pyc
+|           dashboard_tab.cpython-314.pyc
+|           history_tab.cpython-314.pyc
+|           logs_tab.cpython-314.pyc
+|           main_window.cpython-314.pyc
+|           __init__.cpython-314.pyc
+|           
++---logs
+|       .gitkeep
+|       support_checklist_YYYY-MM-DD.log
+|       
++---modules
+|   |   checklist_runner.py
+|   |   checklist_worker.py
+|   |   folder_backup.py
+|   |   iis_manager.py
+|   |   service_backup.py
+|   |   sql_backup.py
+|   |   __init__.py
+|   |   
+|   \---__pycache__
+|           checklist_runner.cpython-314.pyc
+|           checklist_worker.cpython-314.pyc
+|           folder_backup.cpython-314.pyc
+|           iis_manager.cpython-314.pyc
+|           service_backup.cpython-314.pyc
+|           sql_backup.cpython-314.pyc
+|           __init__.cpython-314.pyc
+|           
++---reports
+|       .gitkeep
+|       checklist_report_Y0601_150246.json
+|       checklist_report_Y0601_150512.json
+|       checklist_report_Y0601_153156.json
+|       checklist_report_Y0601_161618.json
+|       checklist_report_Y0601_163831.json
+|       checklist_report_Y0601_182420.json
+|       checklist_report_Y0601_182420.xlsx
+|       checklist_report_Y0601_182511.json
+|       checklist_report_Y0601_182511.xlsx
+|       
++---tools
+|       probe_checklist.py
+|       run_checklist_test.py
+|       
++---utils
+|   |   compression.py
+|   |   config_manager.py
+|   |   encryption.py
+|   |   hashing.py
+|   |   history_manager.py
+|   |   logger.py
+|   |   __init__.py
+|   |   
+|   \---__pycache__
+|           compression.cpython-314.pyc
+|           config_manager.cpython-314.pyc
+|           encryption.cpython-314.pyc
+|           hashing.cpython-314.pyc
+|           history_manager.cpython-314.pyc
+|           logger.cpython-314.pyc
+|           __init__.cpython-314.pyc
+|           
+\---__pycache__
+        app.cpython-314.pyc
+        __init__.cpython-314.pyc
+        

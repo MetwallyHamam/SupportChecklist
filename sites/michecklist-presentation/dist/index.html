@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="MiChecklist automates infrastructure backups, cleanup, scheduling, verification, and operational reporting from one Windows service.">
+  <meta property="og:title" content="MiChecklist — One run. Every safeguard.">
+  <meta property="og:description" content="A presentation of the MiChecklist operations platform.">
+  <title>MiChecklist — Operations Presentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+  <header class="topbar">
+    <a class="brand" href="#top" aria-label="MiChecklist home">
+      <span class="brand-mark">M</span>
+      <span>MiChecklist</span>
+    </a>
+    <nav aria-label="Presentation sections">
+      <a href="#workflow">Workflow</a>
+      <a href="#coverage">Coverage</a>
+      <a href="#safety">Safeguards</a>
+    </nav>
+    <a class="release-link" href="#release">Release <span>1.0.0.6</span></a>
+  </header>
+
+  <main id="top">
+    <section class="hero section">
+      <div class="hero-copy reveal">
+        <p class="eyebrow"><span class="pulse"></span> Windows operations, orchestrated</p>
+        <h1>One run.<br><em>Every safeguard.</em></h1>
+        <p class="lede">MiChecklist turns a fragile sequence of infrastructure tasks into one verified, scheduled, and reportable workflow—from IIS and SQL Server to services, folders, and cleanup.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="#workflow">Explore the workflow <span>↓</span></a>
+          <a class="text-link" href="#release">View latest release <span>↗</span></a>
+        </div>
+      </div>
+
+      <div class="console reveal" aria-label="Illustration of a completed MiChecklist run">
+        <div class="console-bar">
+          <div class="console-brand"><span class="mini-mark">M</span> MiChecklist</div>
+          <div class="window-dots"><i></i><i></i><i></i></div>
+        </div>
+        <div class="console-body">
+          <div class="run-head">
+            <div><span class="label">CURRENT RUN</span><strong>Infrastructure checklist</strong></div>
+            <span class="status"><i></i> Completed</span>
+          </div>
+          <div class="progress"><span></span></div>
+          <div class="op-list">
+            <div class="op"><span class="op-icon orange">IIS</span><div><strong>Applications</strong><small>4 selected · verified</small></div><b>✓</b></div>
+            <div class="op"><span class="op-icon mint">SQL</span><div><strong>Databases</strong><small>3 backups · SHA-256</small></div><b>✓</b></div>
+            <div class="op"><span class="op-icon pink">SVC</span><div><strong>Windows services</strong><small>Executables preserved</small></div><b>✓</b></div>
+            <div class="op"><span class="op-icon yellow">RPT</span><div><strong>Operations report</strong><small>Delivered to support</small></div><b>✓</b></div>
+          </div>
+          <div class="console-foot"><span>JOB ID</span><code>3380e77b…4304</code><time>01:02.4</time></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="statement section reveal">
+      <p class="section-index">01 / THE PROBLEM</p>
+      <div>
+        <h2>Infrastructure work is only simple<br><span>until one step is missed.</span></h2>
+        <p>Backups, retention, cleanup, service state, permissions, schedules, and client reporting all depend on each other. MiChecklist makes the dependencies visible—and makes completion provable.</p>
+      </div>
+    </section>
+
+    <section id="workflow" class="workflow section">
+      <div class="section-heading reveal">
+        <p class="section-index">02 / ONE CONTROLLED FLOW</p>
+        <h2>Configure once.<br>Run with confidence.</h2>
+      </div>
+      <div class="steps">
+        <article class="step reveal">
+          <span class="step-no">01</span>
+          <div class="step-visual identity-card">
+            <span class="field-label">CLIENT INFORMATION</span>
+            <div class="mock-field"><span>My PC</span><i>Client</i></div>
+            <div class="mock-field valid"><span>support@millensys.com</span><i>✓</i></div>
+          </div>
+          <h3>Identify</h3>
+          <p>Capture client, branch, server, reception email, and CC first. Millensys-domain validation keeps routing accurate.</p>
+        </article>
+        <article class="step reveal">
+          <span class="step-no">02</span>
+          <div class="step-visual select-card">
+            <div class="select-head"><span>SELECT IIS APPS</span><button>All ✓</button></div>
+            <div><i class="check on"></i><span>SupportHub</span><b>Backup</b></div>
+            <div><i class="check on"></i><span>Monitoring</span><b>Backup + cleanup</b></div>
+            <div><i class="check"></i><span>Dashboard</span><b>Available</b></div>
+          </div>
+          <h3>Select</h3>
+          <p>Choose exactly what matters with vertical IIS site and child-app lists, independent backup and cleanup controls, and select-all actions.</p>
+        </article>
+        <article class="step reveal">
+          <span class="step-no">03</span>
+          <div class="step-visual verify-card">
+            <div class="shield">✓</div>
+            <div><strong>Backup verified</strong><span>SHA-256 integrity passed</span></div>
+            <div class="hash">90255b17a4cb…a7e86</div>
+          </div>
+          <h3>Verify</h3>
+          <p>Execute, compress, hash, and inspect the result. SQL staging handles destinations that the database service cannot reach directly.</p>
+        </article>
+        <article class="step reveal">
+          <span class="step-no">04</span>
+          <div class="step-visual report-card">
+            <span>OPERATIONS REPORT</span>
+            <strong>Completed</strong>
+            <div class="report-line"><i></i><span>IIS</span><b>4 apps</b></div>
+            <div class="report-line"><i></i><span>Database</span><b>3 backups</b></div>
+            <div class="report-line"><i></i><span>Email</span><b>Delivered</b></div>
+          </div>
+          <h3>Report</h3>
+          <p>Deliver a readable result with job identity, duration, backup path, individual item status, warnings, and actionable failure details.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="coverage" class="coverage section">
+      <div class="coverage-intro reveal">
+        <p class="section-index">03 / COMPLETE COVERAGE</p>
+        <h2>One checklist.<br><span>Every operational layer.</span></h2>
+        <p>Each module stays independently configurable while participating in one consistent run, schedule, retention policy, and report.</p>
+      </div>
+      <div class="module-grid">
+        <article class="module wide reveal"><span class="module-code">IIS</span><h3>Sites & child applications</h3><p>Detect sites, applications, pools, and physical paths. Back up selected content and clean up only where explicitly enabled.</p><div class="module-tag">Granular selection</div></article>
+        <article class="module reveal"><span class="module-code">DB</span><h3>SQL Server</h3><p>Native backup, ZIP compression, integrity hashing, staging, and permission-aware delivery.</p><div class="module-tag">Verified output</div></article>
+        <article class="module reveal"><span class="module-code">SVC</span><h3>Windows services</h3><p>Preserve executable folders and capture service state as part of the same operation.</p><div class="module-tag">Service-aware</div></article>
+        <article class="module reveal"><span class="module-code">DIR</span><h3>Folders</h3><p>Include additional business-critical directories with configurable backup paths.</p><div class="module-tag">Flexible scope</div></article>
+        <article class="module wide scheduler reveal"><div><span class="module-code">SCH</span><h3>Scheduling that belongs to the service</h3><p>Daily, weekly, and startup schedules are managed by MiChecklistService—without depending on an interactive desktop session.</p></div><div class="schedule-ui"><span>AT WINDOWS / SERVICE STARTUP</span><strong>Enabled</strong><i></i></div></article>
+      </div>
+    </section>
+
+    <section id="safety" class="safety section">
+      <div class="safety-copy reveal">
+        <p class="section-index">04 / BUILT FOR THE BAD DAYS</p>
+        <h2>A backup is not successful<br><span>because a command ran.</span></h2>
+        <p>MiChecklist treats a job as complete only after its output is checked. When permissions, locked files, or interrupted processes get in the way, the report explains what happened in operational language.</p>
+      </div>
+      <div class="safety-list reveal">
+        <div><span>01</span><strong>Verify before success</strong><p>Output existence, compression, and SHA-256 integrity are checked before completion.</p></div>
+        <div><span>02</span><strong>Recover interrupted work</strong><p>Persistent queues, startup recovery, heartbeat monitoring, and retries protect scheduled jobs.</p></div>
+        <div><span>03</span><strong>Preserve the latest valid backup</strong><p>Retention can clean older artifacts without deleting the newest proven recovery point.</p></div>
+        <div><span>04</span><strong>Make warnings actionable</strong><p>Permission failures and locked files identify the exact item and the reason it needs attention.</p></div>
+      </div>
+    </section>
+
+    <section class="report-preview section reveal">
+      <div class="report-top"><div><span class="mini-mark">M</span><b>Support Checklist</b></div><span>Automated operations report</span><span>Client: <b>My PC</b></span></div>
+      <div class="report-title"><span class="success-dot"></span><div><small>FINAL STATUS</small><strong>Completed with clarity.</strong></div><p>Every selected operation, artifact, warning, and skipped item is accounted for in one readable report.</p></div>
+      <div class="report-table">
+        <div class="table-head"><span>ITEM</span><span>STATUS</span><span>DETAILS</span></div>
+        <div><b>IIS applications</b><em>Completed</em><span>4 selected apps · ZIP verified</span></div>
+        <div><b>SQL databases</b><em>Completed</em><span>3 databases · SHA-256 recorded</span></div>
+        <div><b>Cleanup</b><em class="warn">Warning</em><span>1 active log safely skipped</span></div>
+      </div>
+    </section>
+
+    <section id="release" class="release section reveal">
+      <div>
+        <p class="section-index">05 / READY TO OPERATE</p>
+        <h2>Make the next run<br>the predictable one.</h2>
+      </div>
+      <div class="release-card">
+        <div><span class="release-badge">CURRENT RELEASE</span><strong>MiChecklist 1.0.0.6</strong><p>Windows 64-bit distribution</p></div>
+        <div class="release-meta"><span><b>110</b> automated tests</span><span><b>SHA-256</b> release integrity</span><span><b>Service-led</b> scheduling</span></div>
+        <p class="availability">Release package is available from the MiChecklist distribution workspace.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <a class="brand" href="#top"><span class="brand-mark">M</span><span>MiChecklist</span></a>
+    <p>Infrastructure operations, made accountable.</p>
+    <a href="#top">Back to top ↑</a>
+  </footer>
+  <script src="app.js"></script>
+</body>
+</html>

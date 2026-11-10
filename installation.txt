@@ -1,0 +1,3 @@
+cd /d "D:\Metwally\Developing tools\Support Checklist\SupportChecklist"
+
+python build_exe.py --clean
