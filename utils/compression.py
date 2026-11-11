@@ -3,9 +3,41 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
 import zipfile
 from copy import copy
 from pathlib import Path
+
+
+def _validate_zip(path: Path) -> None:
+    with zipfile.ZipFile(path, "r") as archive:
+        if archive.testzip() is not None:
+            raise RuntimeError(f"Compressed archive validation failed: {path}")
+
+
+def _publish_zip(temporary_path: Path, destination: Path) -> None:
+    """Publish a validated ZIP despite transient locks or delete-restricted ACLs."""
+    last_error: PermissionError | None = None
+    for delay in (0.1, 0.25, 0.5, 1.0, 2.0):
+        try:
+            os.replace(temporary_path, destination)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(delay)
+
+    if not destination.exists():
+        raise last_error or PermissionError(f"Unable to publish archive: {destination}")
+
+    # Some destination ACLs permit writing but deny deleting/replacing an
+    # existing directory entry. The temporary ZIP is already complete, so copy
+    # it over the existing file, flush it, and validate the published result.
+    with temporary_path.open("rb") as source, destination.open("wb") as target:
+        shutil.copyfileobj(source, target, length=1024 * 1024)
+        target.flush()
+        os.fsync(target.fileno())
+    _validate_zip(destination)
+    temporary_path.unlink()
 
 
 def archive_folder(
@@ -26,10 +58,9 @@ def archive_folder(
         destination_zip, "w", compression=compression,
         strict_timestamps=False,
     ) as archive:
-        root_path = source if include_root else source
         for file_path in source.rglob("*"):
             if file_path.is_file():
-                archive_path = file_path.relative_to(root_path.parent if include_root else root_path)
+                archive_path = file_path.relative_to(source.parent if include_root else source)
                 archive.write(file_path, arcname=str(archive_path))
 
 
@@ -51,7 +82,8 @@ def compress_existing_zip(archive_path: Path) -> None:
                 target_member.compress_type = zipfile.ZIP_DEFLATED
                 with source.open(member, "r") as reader, target.open(target_member, "w") as writer:
                     shutil.copyfileobj(reader, writer, length=1024 * 1024)
-        os.replace(temporary_path, archive_path)
+        _validate_zip(temporary_path)
+        _publish_zip(temporary_path, archive_path)
         temporary_path = None
     finally:
         if temporary_path and temporary_path.exists():
@@ -89,7 +121,7 @@ def compress_file_to_zip(source: Path, destination_zip: Path | None = None) -> P
         with zipfile.ZipFile(temporary_path, "r") as archive:
             if archive.namelist() != [source.name] or archive.testzip() is not None:
                 raise RuntimeError(f"Compressed archive validation failed: {destination}")
-        os.replace(temporary_path, destination)
+        _publish_zip(temporary_path, destination)
         temporary_path = None
         source.unlink()
         return destination

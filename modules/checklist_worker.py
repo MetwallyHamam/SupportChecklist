@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, Signal
-from typing import Any
 
+from core.execution_lock import checklist_execution_lock
 from modules.checklist_runner import ChecklistRunner
 from utils.config_manager import ConfigManager
 
@@ -26,7 +26,8 @@ class ChecklistWorker(QObject):
     def run(self) -> None:
         self.started.emit()
         try:
-            result = self.runner.run(progress_callback=self._emit_progress, stop_check=self._is_stopped)
+            with checklist_execution_lock():
+                result = self.runner.run(progress_callback=self._emit_progress, stop_check=self._is_stopped)
             if result.get("status") == "Failed":
                 self.failed.emit(str(result.get("error", "Checklist execution failed.")))
             else:

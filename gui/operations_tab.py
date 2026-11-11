@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
+    QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog,
 )
 

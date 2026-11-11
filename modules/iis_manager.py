@@ -8,7 +8,6 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from utils.subprocess_utils import hidden_window_kwargs
 

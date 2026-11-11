@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QFrame,
 )
-from PySide6.QtCore import Qt
 
 from utils.config_manager import ConfigManager
 

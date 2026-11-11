@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QThread, QTimer
@@ -19,6 +18,7 @@ from gui.operations_tab import OperationsTab
 from gui.script_scheduler_tab import ScriptSchedulerTab
 from gui.about_tab import AboutTab
 from gui.startup_guide import StartupGuide
+from core.job_queue import PersistentJobQueue
 from modules.checklist_worker import ChecklistWorker
 from modules.checklist_runner import ChecklistRunner
 from modules.cleanup_worker import CleanupOnlyWorker
@@ -30,16 +30,36 @@ from utils.paths import get_app_dir, get_resource_path
 from version import COPYRIGHT, __version__
 
 
+def latest_completed_checklist(jobs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the newest full-checklist job in any operator-relevant state."""
+    matches = [
+        job for job in jobs
+        if job.get("type") == "checklist"
+        and job.get("status") in {"queued", "running", "completed", "failed", "interrupted"}
+    ]
+    if not matches:
+        return None
+    return max(
+        matches,
+        key=lambda job: str(job.get("updated_at") or job.get("created_at") or ""),
+    )
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_manager: ConfigManager) -> None:
         super().__init__()
         self.config_manager = config_manager
         self.history_manager = HistoryManager(get_app_dir())
+        self.job_queue = PersistentJobQueue()
         self.checklist_thread: QThread | None = None
         self.checklist_worker: ChecklistWorker | None = None
         self.cleanup_only_thread: QThread | None = None
         self.cleanup_only_worker: CleanupOnlyWorker | None = None
         self.logs_refresh_timer = QTimer(self)
+        self.dashboard_refresh_timer = QTimer(self)
+        self.dashboard_refresh_timer.setInterval(3000)
+        self._dashboard_job_signature = ""
+        self._history_signature: tuple[int, int] | None = None
         self._refreshing_logs = False
         self.tray_icon = None
         self._exit_requested = False
@@ -83,6 +103,8 @@ class MainWindow(QMainWindow):
         self.update_logs_refresh_timer()
         self.refresh_logs()
         self.refresh_history()
+        self.refresh_dashboard_from_runtime(force=True)
+        self.dashboard_refresh_timer.start()
         if not bool(self.config_manager.get("general", "setup_completed", False)):
             QTimer.singleShot(0, self.show_startup_guide)
 
@@ -122,6 +144,51 @@ class MainWindow(QMainWindow):
         self.logs_tab.auto_refresh_checkbox.toggled.connect(self.update_logs_refresh_timer)
         self.logs_tab.refresh_interval_input.valueChanged.connect(self.update_logs_refresh_timer)
         self.logs_refresh_timer.timeout.connect(self.refresh_logs)
+        self.dashboard_refresh_timer.timeout.connect(self.refresh_dashboard_from_runtime)
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+
+    def on_tab_changed(self, _index: int) -> None:
+        if self.tabs.currentWidget() in {self.dashboard_tab, self.history_tab, self.operations_tab}:
+            self.refresh_dashboard_from_runtime()
+
+    def refresh_dashboard_from_runtime(self, force: bool = False) -> None:
+        """Refresh dashboard/history after jobs completed in the Windows service."""
+        if self._operation_running():
+            return
+        history_path = self.history_manager.history_path
+        try:
+            stat = history_path.stat()
+            history_signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            history_signature = None
+        if force or history_signature != self._history_signature:
+            self.refresh_history()
+
+        try:
+            latest_job = latest_completed_checklist(self.job_queue.load())
+        except RuntimeError:
+            return
+        if not latest_job:
+            return
+        signature = f"{latest_job.get('id', '')}:{latest_job.get('updated_at', '')}"
+        if not force and signature == self._dashboard_job_signature:
+            return
+        queue_status = str(latest_job.get("status", ""))
+        result = latest_job.get("result", {})
+        if queue_status == "completed" and isinstance(result, dict):
+            self.update_dashboard_statuses(result)
+            self.dashboard_tab.update_progress(100, "Scheduled checklist completed")
+        elif queue_status == "running":
+            self.dashboard_tab.update_status("Running", "Running", "Running", "Running", "Running")
+            self.dashboard_tab.update_progress(0, "Scheduled checklist running")
+        elif queue_status == "queued":
+            self.dashboard_tab.update_status("Pending", "Pending", "Pending", "Pending", "Pending")
+            self.dashboard_tab.update_progress(0, "Scheduled checklist queued")
+        else:
+            self.dashboard_tab.update_status("Failed", "Failed", "Failed", "Failed", "Failed")
+            reason = str(latest_job.get("last_error", "") or "Scheduled checklist failed")
+            self.dashboard_tab.update_progress(0, reason)
+        self._dashboard_job_signature = signature
 
     def apply_dark_theme(self) -> None:
         palette = QPalette()
@@ -473,6 +540,11 @@ class MainWindow(QMainWindow):
     def refresh_history(self) -> None:
         self.history_tab.load_history(self.history_manager.load_history())
         self.refresh_last_backup()
+        try:
+            stat = self.history_manager.history_path.stat()
+            self._history_signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            self._history_signature = None
 
     def refresh_last_backup(self) -> None:
         history = self.history_manager.load_history()
@@ -511,7 +583,7 @@ class MainWindow(QMainWindow):
             tray_button = prompt.addButton("Minimize to Tray", QMessageBox.AcceptRole)
         exit_button = prompt.addButton("Exit MiChecklist", QMessageBox.DestructiveRole)
         prompt.setDefaultButton(exit_button)
-        cancel_button = prompt.addButton(QMessageBox.Cancel)
+        prompt.addButton(QMessageBox.Cancel)
         prompt.exec()
 
         if tray_button is not None and prompt.clickedButton() is tray_button:

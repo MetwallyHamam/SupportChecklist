@@ -3,15 +3,13 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import threading
-import ctypes
-import hashlib
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 from utils.paths import get_app_dir
+from utils.process_lock import process_lock
 
 
 class PersistentJobQueue:
@@ -22,29 +20,12 @@ class PersistentJobQueue:
         self.path = path or queue_dir / "job_executions.json"
         self.legacy_path = queue_dir / "jobs.json" if path is None else None
         self.execution_log_dir = self.path.parent / "execution_logs"
-        self._lock = threading.RLock()
-        mutex_id = hashlib.sha256(str(self.path.resolve()).casefold().encode("utf-8")).hexdigest()[:24]
-        self._mutex_name = f"Local\\MiChecklistQueue_{mutex_id}"
 
     @contextmanager
     def _process_lock(self):
         """Serialize queue transactions across the GUI and service processes."""
-        if os.name != "nt":
-            with self._lock:
-                yield
-            return
-        handle = ctypes.windll.kernel32.CreateMutexW(None, False, self._mutex_name)
-        if not handle:
-            raise OSError("Unable to create the job queue mutex")
-        try:
-            result = ctypes.windll.kernel32.WaitForSingleObject(handle, 30000)
-            if result not in (0, 0x80):
-                raise TimeoutError("Timed out waiting for the job queue lock")
-            with self._lock:
-                yield
-        finally:
-            ctypes.windll.kernel32.ReleaseMutex(handle)
-            ctypes.windll.kernel32.CloseHandle(handle)
+        with process_lock(self.path):
+            yield
 
     def load(self) -> list[dict]:
         with self._process_lock():
@@ -194,6 +175,41 @@ class PersistentJobQueue:
             self.save(jobs)
             if finished_job and self._is_scheduled_execution(finished_job):
                 self._write_execution_log(finished_job)
+
+    def requeue(self, job_id: str, reason: str = "") -> bool:
+        with self._process_lock():
+            jobs = self.load()
+            for job in jobs:
+                if job.get("id") == job_id:
+                    job["status"] = "queued"
+                    job["last_error"] = reason
+                    job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                    self.save(jobs)
+                    return True
+            return False
+
+    def prune_terminal(self, keep: int = 500) -> int:
+        """Bound completed execution history without removing active work."""
+        with self._process_lock():
+            jobs = self.load()
+            terminal = {"completed", "failed", "superseded", "cancelled", "interrupted"}
+            finished = [job for job in jobs if job.get("status") in terminal]
+            if len(finished) <= keep:
+                return 0
+            keep_ids = {
+                str(job.get("id")) for job in sorted(
+                    finished,
+                    key=lambda value: str(value.get("updated_at") or value.get("created_at") or ""),
+                    reverse=True,
+                )[:keep]
+            }
+            retained = [
+                job for job in jobs
+                if job.get("status") not in terminal or str(job.get("id")) in keep_ids
+            ]
+            removed = len(jobs) - len(retained)
+            self.save(retained)
+            return removed
 
     def update_payload(self, job_id: str, values: dict) -> bool:
         with self._process_lock():

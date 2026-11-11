@@ -61,15 +61,12 @@ def test_backup_size_does_not_round_small_backups_to_zero(size_bytes, expected):
     assert ChecklistRunner._format_backup_size(size_bytes) == expected
 
 
-def test_service_falls_back_to_full_config_when_schedule_filter_removes_all_targets(tmp_path, monkeypatch):
+def test_primary_schedule_always_uses_full_config_even_with_specific_schedules(tmp_path, monkeypatch):
     manager = config_without_backup_targets(tmp_path)
     manager.set("services", "selected_services", ["BackupService"])
     runtime = ServiceRuntime()
     runtime.config = manager
-    filtered = config_without_backup_targets(tmp_path)
     observed = []
-
-    monkeypatch.setattr("core.service_runtime.config_for_default_schedule", lambda *args: filtered)
 
     def fake_run(runner):
         observed.append(runner.config_manager)
@@ -126,6 +123,40 @@ def test_service_deletes_previous_backup_only_after_scheduled_success(tmp_path, 
     completed = runtime.queue.load()[0]
     assert completed["status"] == "completed"
     assert completed["result"]["previous_backups_deleted"] == 1
+
+
+def test_service_preserves_previous_backup_after_warning_result(tmp_path, monkeypatch):
+    old_backup = tmp_path / "Automatedbackup_20261025_020000"
+    warning_backup = tmp_path / "Automatedbackup_20261026_020000"
+    old_backup.mkdir()
+    warning_backup.mkdir()
+    data = deepcopy(DEFAULT_CONFIG)
+    data["general"]["backup_root_folder"] = str(tmp_path)
+    data["schedule"]["enabled"] = False
+    data["schedule"]["delete_previous_automated_backups"] = True
+    runtime = ServiceRuntime()
+    runtime.config = ConfigManager(data=data)
+    runtime.config.load_config = lambda create_if_missing=False: None
+    runtime.queue = PersistentJobQueue(tmp_path / "queue" / "jobs.json")
+    runtime.queue.enqueue("checklist", {"schedule_kind": "default"})
+    monkeypatch.setattr(
+        runtime,
+        "execute",
+        lambda job: {
+            "status": "Completed with Warnings",
+            "backup_path": str(warning_backup),
+            "tasks": [{"task": "IIS", "status": "Partial", "detail": "One app failed"}],
+        },
+    )
+    monkeypatch.setattr("core.service_runtime.EmailNotifier.notify_result", lambda *args, **kwargs: None)
+
+    assert runtime.process_once() is True
+
+    assert old_backup.exists()
+    assert warning_backup.exists()
+    result = runtime.queue.load()[0]["result"]
+    assert result["status"] == "Completed with Warnings"
+    assert "previous_backups_deleted" not in result
 
 
 def test_legacy_interrupted_job_matches_and_removes_only_its_exact_folder(tmp_path):

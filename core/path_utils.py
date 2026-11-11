@@ -1,6 +1,5 @@
 import os
 import sys
-from pathlib import Path
 
 MAX_WIN_PATH = 260
 

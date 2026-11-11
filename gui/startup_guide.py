@@ -8,18 +8,21 @@ from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFormLayout, QHeaderView, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
     QSpinBox, QTimeEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWizard,
-    QWizardPage,
+    QWizardPage, QWidget,
 )
 
 from core.windows_service_manager import WindowsServiceManager
+from core.scheduled_jobs import ScheduledJobStore
 from modules.checklist_runner import ChecklistRunner
 from modules.cleanup_manager import detect_iis_cleanup_tasks, normalize_extensions
 from modules.iis_manager import IISManager
+from modules.iis_selection import site_child_selection
 from modules.service_backup import ServiceBackup
 from modules.sql_backup import SQLBackup
 from utils.config_manager import ConfigManager
 from utils.email_validation import invalid_millensys_addresses, parse_addresses
 from utils.external_drive import capture_external_destination
+from utils.paths import get_app_dir
 
 
 def _addresses(text: str) -> list[str]:
@@ -46,6 +49,7 @@ class StartupGuide(QWizard):
         self.config_manager = config_manager
         self._iis_app_records: list[dict[str, str]] = []
         self._cleanup_app_keys = set(config_manager.get("iis", "selected_cleanup_apps", []) or [])
+        self._applying_iis_site_rules = False
         self.setWindowTitle("MiChecklist First-Time Setup")
         self.setWizardStyle(QWizard.ModernStyle)
         self.setOption(QWizard.NoBackButtonOnStartPage)
@@ -56,10 +60,16 @@ class StartupGuide(QWizard):
         self._build_iis()
         self._build_services()
         self._build_folders_cleanup()
-        self._build_schedule()
         self._build_retention()
         self._build_notifications()
+        self._build_schedule()
         self._build_finish()
+
+    def _scheduled_job_store(self) -> ScheduledJobStore:
+        default_config = (get_app_dir() / "config" / "config.json").resolve()
+        if self.config_manager.config_path.resolve() == default_config:
+            return ScheduledJobStore()
+        return ScheduledJobStore(self.config_manager.config_path.parent / "saved_jobs.json")
 
     def _build_client_info(self) -> None:
         _, layout = self._page(
@@ -252,6 +262,7 @@ class StartupGuide(QWizard):
         layout.addLayout(sites_header)
         self.iis_list = QListWidget()
         self.iis_list.setMaximumHeight(95)
+        self.iis_list.itemChanged.connect(self._apply_iis_site_child_rules)
         for name in iis.get("selected_sites", []) or []:
             self.iis_list.addItem(_check_item(str(name), {"name": str(name), "path": ""}, True))
         layout.addWidget(self.iis_list)
@@ -433,6 +444,50 @@ class StartupGuide(QWizard):
         form.addRow(self.schedule_test_restart)
         form.addRow(self.schedule_hide_to_tray)
         layout.addLayout(form)
+        self.advanced_module_schedules = QCheckBox(
+            "Advanced: enable separate schedules for individual tabs"
+        )
+        module_note = QLabel(
+            "Most installations should use only the primary schedule above. Enable advanced "
+            "schedules only when a module must run more frequently. A collision within 10 "
+            "minutes is automatically satisfied by the primary checklist."
+        )
+        module_note.setWordWrap(True)
+        layout.addWidget(self.advanced_module_schedules)
+        layout.addWidget(module_note)
+        existing_modules = {
+            item.get("payload", {}).get("module"): item
+            for item in self._scheduled_job_store().load()
+            if item.get("job_type") == "module_schedule"
+        }
+        self.module_schedule_controls: dict[str, tuple[QCheckBox, QTimeEdit]] = {}
+        self.module_schedule_container = QWidget()
+        module_form = QFormLayout(self.module_schedule_container)
+        defaults = {
+            "cleanup": "23:00", "database": "01:00", "iis": "03:00",
+            "services": "04:00", "folders": "05:00",
+        }
+        for module, label in (
+            ("cleanup", "Cleanup"), ("database", "Database"), ("iis", "IIS"),
+            ("services", "Services"), ("folders", "Folders"),
+        ):
+            saved = existing_modules.get(module, {})
+            enabled = QCheckBox(f"Enable daily {label} schedule")
+            enabled.setChecked(bool(saved.get("enabled", False)))
+            run_time = QTimeEdit()
+            run_time.setDisplayFormat("HH:mm")
+            parsed = QTime.fromString(str(saved.get("time", defaults[module])), "HH:mm")
+            run_time.setTime(parsed if parsed.isValid() else QTime.fromString(defaults[module], "HH:mm"))
+            row = QHBoxLayout()
+            row.addWidget(enabled)
+            row.addWidget(run_time)
+            module_form.addRow(f"{label} tab:", row)
+            self.module_schedule_controls[module] = (enabled, run_time)
+        advanced_enabled = any(control[0].isChecked() for control in self.module_schedule_controls.values())
+        self.advanced_module_schedules.setChecked(advanced_enabled)
+        self.module_schedule_container.setVisible(advanced_enabled)
+        self.advanced_module_schedules.toggled.connect(self.module_schedule_container.setVisible)
+        layout.addWidget(self.module_schedule_container)
         layout.addWidget(QLabel("Safe retention keeps the latest valid scheduled backup by default."))
         layout.addStretch()
 
@@ -451,6 +506,13 @@ class StartupGuide(QWizard):
         self.smtp_password = QLineEdit(str(email.get("password", "")))
         self.smtp_password.setEchoMode(QLineEdit.Password)
         self.sender_name = QLineEdit(str(email.get("sender_name", "MiChecklist")))
+        self.subject_template = QLineEdit(str(email.get(
+            "subject_template", "[{company} {product}] {status} - {job_type}"
+        )))
+        self.subject_template.setToolTip(
+            "Available fields: {company}, {product}, {status}, {job_type}, {client}, "
+            "{branch}, {server}, {job_id}, {date}"
+        )
         form = QFormLayout()
         form.addRow(self.notifications_enabled)
         form.addRow("SMTP server:", self.smtp_server)
@@ -459,6 +521,7 @@ class StartupGuide(QWizard):
         form.addRow("SMTP username:", self.smtp_username)
         form.addRow("SMTP password:", self.smtp_password)
         form.addRow("Sender name:", self.sender_name)
+        form.addRow("Subject template:", self.subject_template)
         self.notify_success = QCheckBox("Notify after successful jobs")
         self.notify_success.setChecked(bool(email.get("notify_success", True)))
         self.notify_warning = QCheckBox("Notify after jobs with warnings")
@@ -467,10 +530,13 @@ class StartupGuide(QWizard):
         self.notify_failure.setChecked(bool(email.get("notify_failure", True)))
         self.notify_recovery = QCheckBox("Notify after interrupted-job recovery")
         self.notify_recovery.setChecked(bool(email.get("notify_recovery", True)))
+        self.notify_module_success = QCheckBox("Notify after successful advanced module schedules")
+        self.notify_module_success.setChecked(bool(email.get("notify_module_success", False)))
         form.addRow(self.notify_success)
         form.addRow(self.notify_warning)
         form.addRow(self.notify_failure)
         form.addRow(self.notify_recovery)
+        form.addRow(self.notify_module_success)
         layout.addLayout(form)
         note = QLabel("Recipients and client information were configured on the first page and can be changed later in Notifications.")
         note.setWordWrap(True)
@@ -608,6 +674,48 @@ class StartupGuide(QWizard):
             item = _check_item(name, name, name in selected_pools)
             item.setToolTip(f"State: {pool.get('state', '')}")
             self.iis_pool_list.addItem(item)
+        self._apply_iis_site_child_rules()
+
+    def _apply_iis_site_child_rules(self, *_args) -> None:
+        """Select and discover cleanup for children stored outside a selected site root."""
+        if self._applying_iis_site_rules or not self._iis_app_records:
+            return
+        selected_sites = {
+            str(value.get("name", "")): str(value.get("path", ""))
+            for value in self._checked_data(self.iis_list)
+            if isinstance(value, dict) and value.get("name")
+        }
+        selection = site_child_selection(selected_sites, self._iis_app_records)
+        if not selected_sites:
+            for index in range(self.iis_app_list.topLevelItemCount()):
+                self.iis_app_list.topLevelItem(index).setHidden(False)
+            return
+        self._applying_iis_site_rules = True
+        try:
+            for index in range(self.iis_app_list.topLevelItemCount()):
+                item = self.iis_app_list.topLevelItem(index)
+                data = item.data(0, Qt.UserRole)
+                key = str(data.get("key", "")) if isinstance(data, dict) else ""
+                item.setHidden(key not in selection.visible_keys)
+                if key in selection.visible_keys:
+                    item.setCheckState(
+                        0, Qt.Checked if key in selection.backup_keys else Qt.Unchecked
+                    )
+                    item.setCheckState(1, Qt.Checked)
+            self._cleanup_app_keys.update(selection.cleanup_keys)
+            tasks = detect_iis_cleanup_tasks(
+                self._iis_app_records, set(selection.cleanup_keys)
+            )
+            existing = {self.cleanup_list.item(i).text() for i in range(self.cleanup_list.count())}
+            for task in tasks:
+                path = str(task.get("path", ""))
+                if path and path not in existing:
+                    self.cleanup_list.addItem(path)
+                    existing.add(path)
+            if tasks:
+                self.cleanup_enabled.setChecked(True)
+        finally:
+            self._applying_iis_site_rules = False
 
     def _detect_iis_cleanup(self) -> None:
         selected_records = [
@@ -790,6 +898,22 @@ class StartupGuide(QWizard):
         self.config_manager.set("schedule", "run_missed_schedule", self.schedule_run_missed.isChecked())
         self.config_manager.set("schedule", "test_run_after_restart", self.schedule_test_restart.isChecked())
         self.config_manager.set("schedule", "hide_to_tray", self.schedule_hide_to_tray.isChecked())
+        module_labels = {
+            "cleanup": "Cleanup", "database": "Database", "iis": "IIS",
+            "services": "Services", "folders": "Folders",
+        }
+        schedule_store = self._scheduled_job_store()
+        for module, (enabled, run_time) in self.module_schedule_controls.items():
+            schedule_store.upsert_module(
+                module,
+                f"{module_labels[module]} tab schedule",
+                {
+                    "enabled": self.advanced_module_schedules.isChecked() and enabled.isChecked(),
+                    "frequency": "daily",
+                    "time": run_time.time().toString("HH:mm"),
+                    "run_missed": True,
+                },
+            )
         self.config_manager.set("retention", "enabled", self.retention_enabled.isChecked())
         self.config_manager.set("retention", "minimum_successful_backups", self.retention_minimum.value())
         self.config_manager.set("retention", "max_age_days", self.retention_max_age.value())
@@ -804,12 +928,17 @@ class StartupGuide(QWizard):
         self.config_manager.set("email", "username", self.smtp_username.text().strip())
         self.config_manager.set("email", "password", self.smtp_password.text())
         self.config_manager.set("email", "sender_name", self.sender_name.text().strip() or "MiChecklist")
+        self.config_manager.set(
+            "email", "subject_template",
+            self.subject_template.text().strip() or "[{company} {product}] {status} - {job_type}",
+        )
         self.config_manager.set("email", "to", _addresses(self.to_input.text()))
         self.config_manager.set("email", "cc", _addresses(self.cc_input.text()))
         self.config_manager.set("email", "notify_success", self.notify_success.isChecked())
         self.config_manager.set("email", "notify_warning", self.notify_warning.isChecked())
         self.config_manager.set("email", "notify_failure", self.notify_failure.isChecked())
         self.config_manager.set("email", "notify_recovery", self.notify_recovery.isChecked())
+        self.config_manager.set("email", "notify_module_success", self.notify_module_success.isChecked())
         self.config_manager.save_config()
 
     def accept(self) -> None:

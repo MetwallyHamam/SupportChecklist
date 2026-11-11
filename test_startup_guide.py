@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from gui.startup_guide import StartupGuide, _invalid_millensys_addresses
+from core.scheduled_jobs import ScheduledJobStore
 from utils.config_manager import ConfigManager, DEFAULT_CONFIG
 
 
@@ -43,9 +44,9 @@ def test_startup_guide_contains_complete_setup_steps(tmp_path):
         "IIS Websites and Child Applications",
         "Windows Services",
         "Folders and Cleanup",
-        "Checklist Schedule",
         "Backup Retention",
         "Notification Delivery",
+        "Checklist Schedule",
         "Review and Install",
     ]
 
@@ -165,6 +166,85 @@ def test_startup_iis_select_all_controls_backup_and_cleanup_independently(tmp_pa
     assert manager.get("iis", "selected_cleanup_apps") == ["Site|/One", "Site|/Two"]
 
 
+def test_selecting_site_auto_selects_external_child_and_detects_cleanup(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    manager = ConfigManager(config_path=tmp_path / "config.json", data=deepcopy(DEFAULT_CONFIG))
+    guide = StartupGuide(manager)
+    guide.to_input.setText("support@millensys.com")
+
+    site_root = tmp_path / "site"
+    inside_root = site_root / "inside"
+    external_root = tmp_path / "external"
+    (external_root / "Logs").mkdir(parents=True)
+    inside_root.mkdir(parents=True)
+
+    class FakeSite:
+        name = "Portal"
+        physical_path = str(site_root)
+
+    class FakeIIS:
+        def detect_sites(self):
+            return [FakeSite()]
+
+        def list_applications(self):
+            return [
+                {"site": "Portal", "path": "/Inside", "physical_path": str(inside_root), "application_pool": "Pool"},
+                {"site": "Portal", "path": "/External", "physical_path": str(external_root), "application_pool": "Pool"},
+            ]
+
+        def list_app_pools(self):
+            return []
+
+    monkeypatch.setattr("gui.startup_guide.IISManager", FakeIIS)
+    guide._load_iis()
+    guide.iis_list.item(0).setCheckState(Qt.Checked)
+    guide._save_all()
+
+    assert manager.get("iis", "selected_apps") == ["Portal|/External"]
+    assert manager.get("iis", "selected_cleanup_apps") == [
+        "Portal|/External", "Portal|/Inside"
+    ]
+    assert manager.get("cleanup", "enabled") is True
+    assert [task["path"] for task in manager.get("cleanup", "tasks")] == [
+        str(external_root / "Logs")
+    ]
+
+
+def test_selecting_site_filters_child_application_list(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    manager = ConfigManager(config_path=tmp_path / "config.json", data=deepcopy(DEFAULT_CONFIG))
+    guide = StartupGuide(manager)
+
+    class Site:
+        def __init__(self, name, physical_path):
+            self.name = name
+            self.physical_path = physical_path
+
+    class FakeIIS:
+        def detect_sites(self):
+            return [Site("Site A", r"D:\Sites\A"), Site("Site B", r"D:\Sites\B")]
+
+        def list_applications(self):
+            return [
+                {"site": "Site A", "path": "/AppA", "physical_path": r"D:\Sites\A\AppA", "application_pool": "A"},
+                {"site": "Site B", "path": "/AppB", "physical_path": r"D:\Sites\B\AppB", "application_pool": "B"},
+            ]
+
+        def list_app_pools(self):
+            return []
+
+    monkeypatch.setattr("gui.startup_guide.IISManager", FakeIIS)
+    guide._load_iis()
+    guide.iis_list.item(0).setCheckState(Qt.Checked)
+
+    assert guide.iis_app_list.topLevelItem(0).isHidden() is False
+    assert guide.iis_app_list.topLevelItem(1).isHidden() is True
+
+    guide.iis_list.item(0).setCheckState(Qt.Unchecked)
+    assert guide.iis_app_list.topLevelItem(0).isHidden() is False
+    assert guide.iis_app_list.topLevelItem(1).isHidden() is False
+
+
 def test_startup_guide_saves_configuration_tab_options(tmp_path):
     QApplication.instance() or QApplication([])
     manager = ConfigManager(config_path=tmp_path / "config.json", data=deepcopy(DEFAULT_CONFIG))
@@ -206,6 +286,30 @@ def test_startup_guide_saves_configuration_tab_options(tmp_path):
     assert manager.get("email", "notify_warning") is False
     assert manager.get("email", "notify_failure") is True
     assert manager.get("email", "notify_recovery") is False
+
+
+def test_startup_guide_saves_daily_module_schedules(tmp_path):
+    QApplication.instance() or QApplication([])
+    manager = ConfigManager(config_path=tmp_path / "config.json", data=deepcopy(DEFAULT_CONFIG))
+    guide = StartupGuide(manager)
+    guide.to_input.setText("support@millensys.com")
+    cleanup_enabled, cleanup_time = guide.module_schedule_controls["cleanup"]
+    database_enabled, database_time = guide.module_schedule_controls["database"]
+    guide.advanced_module_schedules.setChecked(True)
+    cleanup_enabled.setChecked(True)
+    cleanup_time.setTime(cleanup_time.time().fromString("23:15", "HH:mm"))
+    database_enabled.setChecked(True)
+    database_time.setTime(database_time.time().fromString("01:30", "HH:mm"))
+
+    guide._save_all()
+
+    schedules = ScheduledJobStore(tmp_path / "saved_jobs.json").load()
+    by_module = {item["payload"]["module"]: item for item in schedules}
+    assert by_module["cleanup"]["enabled"] is True
+    assert by_module["cleanup"]["time"] == "23:15"
+    assert by_module["database"]["enabled"] is True
+    assert by_module["database"]["time"] == "01:30"
+    assert by_module["iis"]["enabled"] is False
 
 
 def test_michecklist_starts_at_version_one():

@@ -94,35 +94,49 @@ def main() -> int:
     parser.add_argument("--clean", action="store_true", help="Ask PyInstaller to clean cached build files.")
     args = parser.parse_args()
 
-    display_version = write_version_file(next_version())
-    command = [sys.executable, "-m", "PyInstaller", "--noconfirm"]
-    if args.clean:
-        command.append("--clean")
-    command.append("app.spec")
+    metadata_paths = [COUNTER_FILE, VERSION_FILE, APP_DIR / "version.py", APP_DIR / "README.md"]
+    snapshots = {
+        path: path.read_bytes() if path.exists() else None for path in metadata_paths
+    }
+    published = False
+    try:
+        display_version = write_version_file(next_version())
+        command = [sys.executable, "-m", "PyInstaller", "--noconfirm"]
+        if args.clean:
+            command.append("--clean")
+        command.append("app.spec")
 
-    print(f"Building MiChecklist.exe version {display_version}")
-    result = subprocess.run(command, cwd=APP_DIR, check=False)
-    if result.returncode:
-        return result.returncode
-    service_command = [sys.executable, "-m", "PyInstaller", "--noconfirm"]
-    if args.clean:
-        service_command.append("--clean")
-    service_command.append("service.spec")
-    service_result = subprocess.run(service_command, cwd=APP_DIR, check=False)
-    if service_result.returncode:
-        return service_result.returncode
-    package_root = APP_DIR / "dist" / f"MiChecklist-{display_version}-win64"
-    if package_root.exists():
+        print(f"Building MiChecklist.exe version {display_version}")
+        result = subprocess.run(command, cwd=APP_DIR, check=False)
+        if result.returncode:
+            return result.returncode
+        service_command = [sys.executable, "-m", "PyInstaller", "--noconfirm"]
+        if args.clean:
+            service_command.append("--clean")
+        service_command.append("service.spec")
+        service_result = subprocess.run(service_command, cwd=APP_DIR, check=False)
+        if service_result.returncode:
+            return service_result.returncode
+        package_root = APP_DIR / "dist" / f"MiChecklist-{display_version}-win64"
+        if package_root.exists():
+            shutil.rmtree(package_root)
+        package_root.mkdir(parents=True)
+        for name in ("MiChecklist.exe", "MiChecklistService.exe"):
+            shutil.copy2(APP_DIR / "dist" / name, package_root / name)
+        for name in ("README.md", "USER_GUIDE.md", "SERVICE_INSTALLATION.md"):
+            shutil.copy2(APP_DIR / name, package_root / name)
+        archive = shutil.make_archive(str(package_root), "zip", package_root)
         shutil.rmtree(package_root)
-    package_root.mkdir(parents=True)
-    for name in ("MiChecklist.exe", "MiChecklistService.exe"):
-        shutil.copy2(APP_DIR / "dist" / name, package_root / name)
-    for name in ("README.md", "USER_GUIDE.md", "SERVICE_INSTALLATION.md"):
-        shutil.copy2(APP_DIR / name, package_root / name)
-    archive = shutil.make_archive(str(package_root), "zip", package_root)
-    shutil.rmtree(package_root)
-    print(f"MiChecklist deployment package: {archive}")
-    return 0
+        print(f"MiChecklist deployment package: {archive}")
+        published = True
+        return 0
+    finally:
+        if not published:
+            for path, content in snapshots.items():
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(content)
 
 
 if __name__ == "__main__":

@@ -44,7 +44,11 @@ class EmailNotifierTests(unittest.TestCase):
         self.assertIn("Millensys Hospital", html)
         self.assertIn("Nightly production backup", html)
         self.assertIn("Client name: Millensys Hospital", plain)
-        self.assertIn("&nbsp;&nbsp;•&nbsp;&nbsp;", html)
+        self.assertIn("MILLENSYS", html)
+        self.assertIn("MiChecklist", html)
+        self.assertIn("&bull;", html)
+        self.assertIn("background:#102A43", html)
+        self.assertIn("background:#00A6D6", html)
         self.assertIn("3.4 GB", html)
         self.assertIn("4 databases", html)
 
@@ -87,7 +91,97 @@ class EmailNotifierTests(unittest.TestCase):
         self.assertIn("IIS: Completed", plain)
         self.assertIn(r"C:\logs\active.log: Access denied", plain)
         self.assertIn(r"E:\Backup\SupportDB.bak.zip", plain)
-        self.assertIn("SHA256: abc123", plain)
+        self.assertNotIn("SHA256", plain)
+        html = message.get_body(preferencelist=("html",)).get_content()
+        self.assertIn(">Archive:</span>", html)
+        self.assertIn(">Compression:</span>", html)
+        self.assertIn("SupportDB.bak.zip", html)
+        self.assertNotIn(r"E:\Backup\SupportDB.bak.zip", html)
+        self.assertIn("ZIP (SQL Server native + ZIP)", html)
+        self.assertNotIn("abc123", html)
+
+    def test_html_groups_details_and_removes_redundant_iis_phase_rows(self):
+        message = self.notifier.build_message(
+            {"id": "grouped-report", "type": "checklist"},
+            "completed",
+            result={
+                "tasks": [
+                    {"task": "IIS Detection", "status": "Completed", "detail": "2 sites"},
+                    {"task": "IIS Sites", "status": "Skipped", "detail": "No sites selected"},
+                    {"task": "IIS Child Applications", "status": "Completed", "detail": "4 selected, 4 detected, 4 archived"},
+                    {"task": "IIS", "status": "Completed"},
+                    {"task": "Services", "status": "Completed", "detail": "1 selected, 1 detected, 1 archived"},
+                ],
+                "iis_apps_detail": [{
+                    "name": "Default Web Site > /SupportHub",
+                    "status": "Completed",
+                    "physical_path": r"D:\SupportHub\Release\frontend",
+                    "archive": r"D:\Michecklist\run\Default_Web_Site_SupportHub.zip",
+                }],
+            },
+        )
+
+        html = message.get_body(preferencelist=("html",)).get_content()
+        self.assertIn(">Summary</td>", html)
+        self.assertIn(">IIS applications</td>", html)
+        self.assertNotIn("IIS Detection", html)
+        self.assertNotIn("No sites selected", html)
+        self.assertIn("Default_Web_Site_SupportHub.zip", html)
+        self.assertNotIn(r"D:\Michecklist\run\Default_Web_Site_SupportHub.zip", html)
+        self.assertIn("max-width:680px", html)
+        self.assertIn('name="viewport"', html)
+        self.assertIn("@media only screen and (max-width:600px)", html)
+
+    def test_failed_iis_row_includes_reason_in_mobile_html(self):
+        message = self.notifier.build_message(
+            {"id": "iis-failure", "type": "checklist"},
+            "completed",
+            result={
+                "tasks": [{
+                    "task": "IIS Child Applications", "status": "Partial",
+                    "detail": "1 selected, 0 archived | Failed: Portal: Access denied",
+                }],
+                "iis_apps_detail": [{
+                    "name": "Millensys > /Portal",
+                    "status": "Failed",
+                    "physical_path": r"D:\Applications\Portal",
+                    "detail": "Access denied while reading web.config",
+                }],
+            },
+        )
+
+        html = message.get_body(preferencelist=("html",)).get_content()
+        plain = message.get_body(preferencelist=("plain",)).get_content()
+        self.assertIn("Access denied while reading web.config", html)
+        self.assertIn("Access denied while reading web.config", plain)
+        self.assertIn(">Reason:</span>", html)
+        self.assertIn('class="section-row"', html)
+
+    def test_subject_template_supports_runtime_fields(self):
+        self.notifier.settings["subject_template"] = (
+            "{client} | {server} | {status} | {job_type} | {job_id}"
+        )
+        message = self.notifier.build_message(
+            {"id": "job-77", "type": "checklist"},
+            "completed",
+            result={"server_name": "SQL-01"},
+        )
+
+        self.assertEqual(
+            str(message["Subject"]),
+            "Millensys Hospital | APP-01 | Completed | Checklist | job-77",
+        )
+
+    def test_invalid_or_multiline_subject_template_falls_back_safely(self):
+        self.notifier.settings["subject_template"] = "Broken {status\nInjected"
+        message = self.notifier.build_message(
+            {"id": "job-safe", "type": "checklist"}, "completed",
+        )
+
+        self.assertEqual(
+            str(message["Subject"]),
+            "[MILLENSYS MiChecklist] Completed - Checklist",
+        )
 
     def test_service_row_uses_archive_status_and_keeps_runtime_state_in_details(self):
         message = self.notifier.build_message(

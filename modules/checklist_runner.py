@@ -196,7 +196,13 @@ class ChecklistRunner:
             report["backup_size_bytes"] = full_size
             report["backup_file_count"] = file_count
             report["backup_size"] = self._format_backup_size(full_size)
-            report["status"] = "Completed"
+            warning_statuses = {"partial", "warning", "completed with warnings", "failed"}
+            has_warnings = any(
+                str(task.get("status", "")).casefold() in warning_statuses
+                for task in report.get("tasks", [])
+                if isinstance(task, dict)
+            )
+            report["status"] = "Completed with Warnings" if has_warnings else "Completed"
             mark_backup_completed(automated_root)
             checkpoint("completed", "")
         except Exception as error:
@@ -251,7 +257,14 @@ class ChecklistRunner:
             self.logger.info("Cleanup-only execution started.")
             self._update_progress(progress_callback, 5, "Starting cleanup only")
             self.cleanup_logs(report, progress_callback, stop_check)
-            report["status"] = "Completed"
+            report["status"] = (
+                "Completed with Warnings"
+                if any(
+                    str(task.get("status", "")).casefold() in {"partial", "warning", "failed"}
+                    for task in report.get("tasks", [])
+                )
+                else "Completed"
+            )
             self._update_progress(progress_callback, 100, "Cleanup only completed")
         except Exception as error:
             self.logger.exception("Cleanup-only execution failed.")
@@ -435,14 +448,13 @@ class ChecklistRunner:
             report["tasks"].append({"task": "IIS Sites", "status": "Skipped", "detail": "No sites selected"})
 
         site_backup_root = self._get_backup_root() / "IIS" / "Sites"
-        selected_site_paths: list[Path] = []
+        successful_site_paths: list[Path] = []
         for index, site in enumerate(sites_to_backup, start=1):
             if self._should_stop(stop_check):
                 raise RuntimeError("Checklist stopped by user.")
             self._update_progress(progress_callback, 15 + int(25 * index / max(1, len(sites_to_backup))), f"Backing up IIS site {site.name}")
             site_folder = Path(site.physical_path)
-            selected_site_paths.append(site_folder)
-            
+
             # Skip if site path is inside backup root (would cause recursive backup)
             try:
                 site_folder.relative_to(self._get_backup_root())
@@ -457,6 +469,7 @@ class ChecklistRunner:
                     destination = site_backup_root / f"{site.name}_{self._backup_timestamp}.zip"
                     self.folder_backup.backup_folders([{"name": f"{site.name}_{self._backup_timestamp}", "path": str(site_folder), "enabled": True}], site_backup_root)
                     self.logger.info("Backed up IIS site folder %s to %s", site_folder, destination)
+                    successful_site_paths.append(site_folder)
                 except Exception as backup_error:
                     self.logger.warning("Failed to backup IIS site folder %s: %s", site_folder, backup_error)
             else:
@@ -464,23 +477,64 @@ class ChecklistRunner:
 
         app_backup_root = self._get_backup_root() / "IIS" / "ChildApps"
         archived_or_covered_apps = 0
+        app_results: list[dict[str, str]] = []
         for app in selected_app_records:
             app_folder = Path(str(app.get("physical_path", "")))
             app_label = f"{app.get('site', '')} > {app.get('path', '')}"
             if not app_folder.exists():
                 self.logger.warning("IIS child application folder missing for %s: %s", app_label, app_folder)
+                app_results.append({
+                    **app,
+                    "name": app_label,
+                    "status": "Failed",
+                    "detail": f"Physical folder not found: {app_folder}",
+                })
                 continue
-            if any(self._is_path_within(app_folder, site_path) for site_path in selected_site_paths):
+            if any(self._is_path_within(app_folder, site_path) for site_path in successful_site_paths):
                 self.logger.info("IIS child application %s is covered by its selected site folder.", app_label)
                 archived_or_covered_apps += 1
+                app_results.append({
+                    **app,
+                    "name": app_label,
+                    "status": "Covered",
+                    "detail": "Included in a successfully created IIS site archive",
+                })
                 continue
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", app_label).strip("_") or "iis_app"
-            self.folder_backup.backup_folders(
-                [{"name": f"{safe_name}_{self._backup_timestamp}", "path": str(app_folder), "enabled": True}],
-                app_backup_root,
-            )
-            self.logger.info("Backed up IIS child application %s from %s", app_label, app_folder)
-            archived_or_covered_apps += 1
+            try:
+                archives = self.folder_backup.backup_folders(
+                    [{"name": f"{safe_name}_{self._backup_timestamp}", "path": str(app_folder), "enabled": True}],
+                    app_backup_root,
+                )
+                archive = archives[0] if archives else None
+                if archive is None or not archive.is_file() or archive.stat().st_size <= 0:
+                    raise RuntimeError("No valid archive was produced")
+                self.logger.info("Backed up IIS child application %s from %s to %s", app_label, app_folder, archive)
+                archived_or_covered_apps += 1
+                app_results.append({
+                    **app,
+                    "name": app_label,
+                    "status": "Completed",
+                    "archive": str(archive),
+                    "detail": f"Archived from {app_folder}",
+                })
+            except Exception as backup_error:
+                self.logger.exception("Failed to back up IIS child application %s from %s", app_label, app_folder)
+                app_results.append({
+                    **app,
+                    "name": app_label,
+                    "status": "Failed",
+                    "detail": str(backup_error),
+                })
+
+        for missing_key in missing_app_keys:
+            app_results.append({
+                "name": missing_key.replace("|", " > ", 1),
+                "status": "Failed",
+                "detail": "Selected application was not returned by IIS detection",
+            })
+        report["iis_apps_detail"] = app_results
+        failed_apps = [item for item in app_results if item.get("status") == "Failed"]
 
         app_detail = (
             f"{len(selected_apps)} selected, {len(selected_app_records)} detected, "
@@ -488,13 +542,22 @@ class ChecklistRunner:
         )
         if missing_app_keys:
             app_detail += f" | Missing: {', '.join(missing_app_keys)}"
+        if failed_apps:
+            app_detail += " | Failed: " + "; ".join(
+                f"{item.get('name', 'IIS application')}: {item.get('detail', 'Unknown error')}"
+                for item in failed_apps
+            )
         report["tasks"].append({
             "task": "IIS Child Applications",
-            "status": "Partial" if missing_app_keys else "Completed",
+            "status": "Partial" if failed_apps else "Completed",
             "detail": app_detail,
         })
 
-        report["tasks"].append({"task": "IIS", "status": "Completed"})
+        report["tasks"].append({
+            "task": "IIS",
+            "status": "Partial" if failed_apps else "Completed",
+            "detail": f"{len(failed_apps)} child application backup(s) failed" if failed_apps else "",
+        })
 
     def backup_services(self, report: dict[str, Any], progress_callback: TaskCallback | None, stop_check: StopCheck | None) -> None:
         self.logger.info("Starting service backup phase.")
@@ -514,8 +577,10 @@ class ChecklistRunner:
             report["services_detail"] = []
             return
 
-        services = self.service_backup.list_services()
-        services = [service for service in services if service.name in selected_service_names]
+        detected_services = self.service_backup.list_services()
+        services = [service for service in detected_services if service.name in selected_service_names]
+        detected_service_names = {service.name for service in services}
+        missing_service_names = sorted(selected_service_names - detected_service_names)
 
         report["tasks"].append({"task": "Services", "status": "Running", "detail": f"{len(services)} services detected"})
         self._update_progress(progress_callback, 45, "Detecting Windows services")
@@ -525,22 +590,72 @@ class ChecklistRunner:
         for index, service in enumerate(services, start=1):
             if self._should_stop(stop_check):
                 raise RuntimeError("Checklist stopped by user.")
-            if service.executable_path:
-                archive_path = self.service_backup.backup_service_folder(service.executable_path, service_backup_root)
-                self.logger.info("Backed up service %s to %s", service.name, archive_path)
+            if not service.executable_path:
                 services_detail.append({
                     "name": service.name,
                     "display_name": service.display_name,
-                    "path": service.executable_path,
-                    # The report status describes the requested archive operation.
-                    # Keep the Windows service state as separate supporting detail.
-                    "status": "Completed",
                     "runtime_status": service.status,
-                    "archive": str(archive_path),
+                    "status": "Failed",
+                    "detail": "The service executable path is empty",
                 })
+            else:
+                try:
+                    archive_path = self.service_backup.backup_service_folder(
+                        service.executable_path, service_backup_root
+                    )
+                    if not archive_path.is_file() or archive_path.stat().st_size <= 0:
+                        raise RuntimeError("No valid service archive was produced")
+                    self.logger.info("Backed up service %s to %s", service.name, archive_path)
+                    services_detail.append({
+                        "name": service.name,
+                        "display_name": service.display_name,
+                        "path": service.executable_path,
+                        # The report status describes the requested archive operation.
+                        # Keep the Windows service state as separate supporting detail.
+                        "status": "Completed",
+                        "runtime_status": service.status,
+                        "archive": str(archive_path),
+                        "detail": "Service folder archived successfully",
+                    })
+                except Exception as backup_error:
+                    self.logger.exception(
+                        "Failed to back up service %s from %s",
+                        service.name,
+                        service.executable_path,
+                    )
+                    services_detail.append({
+                        "name": service.name,
+                        "display_name": service.display_name,
+                        "path": service.executable_path,
+                        "runtime_status": service.status,
+                        "status": "Failed",
+                        "detail": str(backup_error),
+                    })
             self._update_progress(progress_callback, 45 + int(15 * index / max(1, len(services))), f"Backing up service {service.name}")
 
-        report["tasks"].append({"task": "Services", "status": "Completed"})
+        for service_name in missing_service_names:
+            services_detail.append({
+                "name": service_name,
+                "status": "Failed",
+                "detail": "Selected service was not returned by Windows service detection",
+            })
+
+        archived_count = sum(item.get("status") == "Completed" for item in services_detail)
+        failed_services = [item for item in services_detail if item.get("status") == "Failed"]
+        summary = (
+            f"{len(selected_service_names)} selected, {len(services)} detected, "
+            f"{archived_count} archived"
+        )
+        if failed_services:
+            summary += " | Failed: " + "; ".join(
+                f"{item.get('name', 'Service')}: {item.get('detail', 'Unknown error')}"
+                for item in failed_services
+            )
+        report["tasks"].append({
+            "task": "Services",
+            "status": "Partial" if failed_services else "Completed",
+            "detail": summary,
+        })
         report["services_detail"] = services_detail
 
     def backup_sql(self, report: dict[str, Any], progress_callback: TaskCallback | None, stop_check: StopCheck | None) -> None:
@@ -723,18 +838,23 @@ class ChecklistRunner:
                 report.get("backup_size", ""),
             ])
 
-            # IIS Sites
-            sites = report.get("tasks", [])
-
             if "iis_apps" in report:
                 ws2 = wb.create_sheet("IIS Child Apps")
-                ws2.append(["Site", "Path", "Physical Path", "Application Pool"])
+                ws2.append(["Site", "Path", "Physical Path", "Application Pool", "Backup Status", "Archive", "Details"])
+                app_results = {
+                    (item.get("site", ""), item.get("path", "")): item
+                    for item in report.get("iis_apps_detail", [])
+                }
                 for app in report["iis_apps"]:
+                    result = app_results.get((app.get("site", ""), app.get("path", "")), {})
                     ws2.append([
                         app.get("site", ""),
                         app.get("path", ""),
                         app.get("physical_path", ""),
                         app.get("application_pool", ""),
+                        result.get("status", ""),
+                        result.get("archive", ""),
+                        result.get("detail", ""),
                     ])
 
             if "iis_pools" in report:
@@ -745,11 +865,12 @@ class ChecklistRunner:
 
             if "services_detail" in report:
                 ws4 = wb.create_sheet("Services")
-                ws4.append(["Name", "Display Name", "Path", "Archive Status", "Runtime State", "Archive"])
+                ws4.append(["Name", "Display Name", "Path", "Archive Status", "Runtime State", "Archive", "Details"])
                 for svc in report["services_detail"]:
                     ws4.append([
                         svc.get("name", ""), svc.get("display_name", ""), svc.get("path", ""),
                         svc.get("status", ""), svc.get("runtime_status", ""), svc.get("archive", ""),
+                        svc.get("detail", ""),
                     ])
 
             if "databases" in report:

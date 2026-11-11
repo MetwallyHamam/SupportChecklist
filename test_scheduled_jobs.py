@@ -22,6 +22,9 @@ def test_daily_schedule_is_enqueued_only_once(tmp_path):
     schedules.add("Daily", "database_backup", {}, {
         "frequency": "daily", "time": "02:00", "run_missed": True,
     })
+    items = schedules.load()
+    items[0]["created_at"] = "2026-09-27T01:00:00"
+    schedules.save(items)
     now = datetime(2026, 9, 28, 3, 0)
     assert schedules.enqueue_due(queue, now) == 1
     assert schedules.enqueue_due(queue, now) == 0
@@ -34,6 +37,9 @@ def test_weekly_schedules_are_independent(tmp_path):
     schedules.add("Weekly", "cleanup", {"path": "C:/logs"}, {
         "frequency": "weekly", "time": "02:00", "weekdays": ["Monday"],
     })
+    items = schedules.load()
+    items[0]["created_at"] = "2026-09-20T01:00:00"
+    schedules.save(items)
     assert schedules.enqueue_due(queue, datetime(2026, 9, 28, 3, 0)) == 1
     assert queue.load()[0]["type"] == "cleanup"
 
@@ -63,6 +69,9 @@ def test_monthly_schedule_catches_up_and_clamps_to_month_end(tmp_path):
         "frequency": "monthly", "time": "02:00", "day_of_month": 31,
         "run_missed": True,
     })
+    items = schedules.load()
+    items[0]["created_at"] = "2026-01-01T01:00:00"
+    schedules.save(items)
 
     assert schedules.enqueue_due(queue, datetime(2026, 2, 28, 3, 0)) == 1
     job = queue.load()[0]
@@ -84,6 +93,51 @@ def test_startup_schedule_runs_once_per_service_start(tmp_path):
     assert [job["payload"]["scheduled_for"] for job in queue.load()] == [
         "startup:boot-a", "startup:boot-b",
     ]
+
+
+def test_module_schedule_is_updated_instead_of_duplicated(tmp_path):
+    schedules = ScheduledJobStore(tmp_path / "schedules.json")
+
+    first_id = schedules.upsert_module("cleanup", "Cleanup tab schedule", {
+        "frequency": "daily", "time": "23:00",
+    })
+    second_id = schedules.upsert_module("cleanup", "Cleanup tab schedule", {
+        "frequency": "daily", "time": "22:30",
+    })
+
+    assert first_id == second_id
+    items = schedules.load()
+    assert len(items) == 1
+    assert items[0]["payload"] == {"module": "cleanup", "module_scope": "cleanup"}
+    assert items[0]["time"] == "22:30"
+
+
+def test_primary_schedule_satisfies_colliding_module_schedule(tmp_path):
+    queue = PersistentJobQueue(tmp_path / "queue.json")
+    schedules = ScheduledJobStore(tmp_path / "schedules.json")
+    schedules.upsert_module("cleanup", "Cleanup tab schedule", {
+        "frequency": "daily", "time": "02:00", "run_missed": True,
+    })
+    queue.enqueue("checklist", {
+        "schedule_kind": "default", "scheduled_for": "2026-11-11T02:00",
+    })
+
+    assert schedules.enqueue_due(queue, datetime(2026, 11, 11, 2, 5)) == 0
+    assert [job["type"] for job in queue.load()] == ["checklist"]
+
+
+def test_new_daily_schedule_does_not_catch_up_before_it_was_created(tmp_path):
+    queue = PersistentJobQueue(tmp_path / "queue.json")
+    schedules = ScheduledJobStore(tmp_path / "schedules.json")
+    schedules.upsert_module("cleanup", "Cleanup tab schedule", {
+        "frequency": "daily", "time": "03:00", "run_missed": True,
+    })
+    items = schedules.load()
+    items[0]["created_at"] = "2026-11-11T02:55:00"
+    schedules.save(items)
+
+    assert schedules.enqueue_due(queue, datetime(2026, 11, 11, 2, 59)) == 0
+    assert queue.load() == []
 
 
 def test_storage_path_classification():

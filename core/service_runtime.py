@@ -4,6 +4,7 @@ import json
 import re
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -14,6 +15,7 @@ from core.retention import apply_retention
 from core.scheduled_jobs import ScheduledJobStore
 from core.script_runner import run_script
 from core.external_copy import copy_verified_backup
+from core.execution_lock import ChecklistExecutionBusy, checklist_execution_lock
 from core.backup_lifecycle import (
     is_legacy_interrupted_scheduled_checklist,
     remove_incomplete_backups,
@@ -22,7 +24,6 @@ from core.backup_lifecycle import (
 from modules.checklist_runner import ChecklistRunner
 from modules.folder_backup import FolderBackup
 from modules.scheduler_manager import (
-    config_for_default_schedule,
     delete_previous_automated_backups,
     enqueue_default_checklist_if_due,
 )
@@ -31,6 +32,26 @@ from utils.config_manager import ConfigManager
 from utils.logger import get_logger
 from utils.paths import get_app_dir
 from utils.external_drive import ExternalDriveUnavailable, resolve_external_destination
+
+
+def config_for_module(config: ConfigManager, module: str) -> ConfigManager:
+    """Return a checklist configuration containing one backup module only."""
+    data = deepcopy(config.data)
+    data.setdefault("cleanup", {})["enabled"] = False
+    if module != "iis":
+        data.setdefault("iis", {})["backup_enabled"] = False
+        data["iis"]["selected_sites"] = []
+        data["iis"]["selected_apps"] = []
+    if module != "services":
+        data.setdefault("services", {})["backup_enabled"] = False
+        data["services"]["selected_services"] = []
+    if module != "database":
+        data.setdefault("sql_server", {})["backup_enabled"] = False
+        data["sql_server"]["databases"] = []
+        data["sql_server"]["database_name"] = ""
+    if module != "folders":
+        data.setdefault("folder_backup", {})["folders"] = []
+    return ConfigManager(config_path=config.config_path, data=data)
 
 
 class ServiceRuntime:
@@ -50,6 +71,19 @@ class ServiceRuntime:
     @staticmethod
     def _uses_backup_destination(job: dict) -> bool:
         return job.get("type") == "external_backup_copy"
+
+    def _should_notify_success(self, job: dict, result: dict) -> bool:
+        if job.get("type") != "module_schedule":
+            return True
+        if self.config.get("email", "notify_module_success", False):
+            return True
+        return any(
+            str(item.get("status", "")).casefold() in {
+                "partial", "warning", "completed with warnings", "failed",
+            }
+            for item in result.get("tasks", []) or []
+            if isinstance(item, dict)
+        )
 
     def _external_settings(self) -> dict:
         return self.config.get_section("external_copy")
@@ -112,18 +146,9 @@ class ServiceRuntime:
         job_type = job.get("type")
         payload = job.get("payload", {})
         if job_type == "checklist":
-            run_config = (
-                self.config
-                if payload.get("include_all", False)
-                else config_for_default_schedule(self.config, self.schedules)
-            )
-            runner = ChecklistRunner(run_config)
-            if not payload.get("include_all", False) and not runner._has_selected_backup_targets():
-                self.logger.warning(
-                    "Custom schedule filtering removed every backup target; "
-                    "running the default checklist with all configured backup items."
-                )
-                runner = ChecklistRunner(self.config)
+            # The primary schedule always runs all configured modules. Specific
+            # module schedules are additional occurrences, not overrides.
+            runner = ChecklistRunner(self.config)
             if job.get("id"):
                 result = runner.run(
                     resume_state=payload.get("resume", {}),
@@ -133,8 +158,22 @@ class ServiceRuntime:
                 )
             else:
                 result = runner.run()
-            if result.get("status") != "Completed":
+            if result.get("status") not in {"Completed", "Completed with Warnings"}:
                 raise RuntimeError(str(result.get("error", "Checklist failed")))
+            return result
+        if job_type == "module_schedule":
+            module = str(payload.get("module", "")).strip().casefold()
+            if module == "cleanup":
+                result = ChecklistRunner(self.config).run_cleanup_only()
+            elif module == "database":
+                result = ChecklistRunner(self.config).run_database_only()
+            elif module in {"iis", "services", "folders"}:
+                result = ChecklistRunner(config_for_module(self.config, module)).run()
+            else:
+                raise ValueError(f"Unsupported scheduled module: {module or 'empty'}")
+            if result.get("status") not in {"Completed", "Completed with Warnings"}:
+                raise RuntimeError(str(result.get("error", f"{module.title()} module failed")))
+            result["schedule_scope"] = module
             return result
         if job_type == "database_backup":
             result = ChecklistRunner(self.config).run_database_only()
@@ -310,11 +349,18 @@ class ServiceRuntime:
         )
         monitor_thread.start()
         try:
-            result = self.execute(job)
+            try:
+                with checklist_execution_lock():
+                    result = self.execute(job)
+            except ChecklistExecutionBusy as exc:
+                self.queue.requeue(str(job.get("id", "")), str(exc))
+                self.logger.info("Deferred job %s because another checklist is running.", job.get("id", ""))
+                self.write_heartbeat("waiting_for_active_checklist", error=str(exc))
+                return False
             external_copy_job_id = ""
             if (
                 self._external_settings().get("enabled", False)
-                and job.get("type") in {"checklist", "database_backup", "folder_backup", "iis_backup", "service_backup"}
+                and job.get("type") in {"checklist", "module_schedule", "database_backup", "folder_backup", "iis_backup", "service_backup"}
                 and result.get("backup_path")
             ):
                 external_copy_job_id = self.queue.enqueue_external_copy(
@@ -355,7 +401,10 @@ class ServiceRuntime:
                 })
             self.logger.info("Completed job %s (type=%s)", job["id"], job.get("type", ""))
             retention = self.config.get_section("retention")
-            if retention.get("enabled", True):
+            retention_safe = (
+                job.get("type") != "checklist" or result.get("status") == "Completed"
+            )
+            if retention.get("enabled", True) and retention_safe:
                 root = self.config.get("general", "backup_root_folder", "")
                 if root:
                     apply_retention(
@@ -365,10 +414,16 @@ class ServiceRuntime:
                         protected_paths=self.queue.pending_external_source_paths(),
                     )
             try:
-                notifier.notify_result(job, "completed", result=result)
+                if self._should_notify_success(job, result):
+                    notifier.notify_result(job, "completed", result=result)
+                else:
+                    self.logger.info(
+                        "Successful module-schedule email suppressed by notification settings."
+                    )
             except Exception:
                 self.logger.exception("Completion email failed")
             self.write_heartbeat("idle")
+            self.queue.prune_terminal()
         except Exception as exc:
             self.logger.exception("Service job failed")
             if self._uses_backup_destination(job) and self._external_settings().get("enabled", False):
@@ -389,6 +444,17 @@ class ServiceRuntime:
                     self.write_heartbeat("waiting_external", job["id"], str(drive_error))
                     return True
             self.queue.finish(job["id"], "failed", error=str(exc))
+            if job.get("type") == "checklist":
+                from utils.history_manager import HistoryManager
+                HistoryManager(get_app_dir()).add_record({
+                    "date": datetime.now().isoformat(timespec="seconds"),
+                    "duration": "",
+                    "status": "Failed",
+                    "backup_size": "N/A",
+                    "backup_path": "",
+                    "error": str(exc),
+                    "run_type": "service-failed",
+                })
             try:
                 notifier.notify_result(job, "failed", str(exc))
             except Exception:

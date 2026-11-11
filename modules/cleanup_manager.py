@@ -81,6 +81,7 @@ def detect_iis_cleanup_tasks(
                 "extensions": list(DEFAULT_LOG_EXTENSIONS),
                 "enabled": True,
                 "source": "IIS Auto Detect",
+                "owner_key": app_key,
             })
     return tasks
 

@@ -4,7 +4,6 @@ import re
 from collections import deque
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
 
 from .paths import get_app_dir
 

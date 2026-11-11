@@ -198,7 +198,7 @@ def _load_last_successful_run(backup_root: Path | None = None) -> datetime | Non
     history = HistoryManager(get_app_dir()).load_history()
     candidates: list[datetime] = []
     for item in history:
-        if item.get("status") != "Completed":
+        if item.get("status") not in {"Completed", "Completed with Warnings"}:
             continue
         try:
             candidates.append(
@@ -391,7 +391,10 @@ def enqueue_default_checklist_if_due(
         return None
     current = (now or datetime.now()).replace(microsecond=0)
     history = HistoryManager(get_app_dir()).load_history()
-    successful = [item for item in history if item.get("status") == "Completed"]
+    successful = [
+        item for item in history
+        if item.get("status") in {"Completed", "Completed with Warnings"}
+    ]
     backup_root_value = str(config_manager.get("general", "backup_root_folder", "")).strip()
     backup_root = Path(backup_root_value).expanduser() if backup_root_value else None
     recorded_backup_exists = any(
@@ -471,8 +474,9 @@ def run_scheduled_checklist(
     elif not scheduled_run_is_due(config_manager):
         logger.info("Scheduled checklist skipped because the configured schedule is not due.")
         return None
-    scheduled_config = config_for_default_schedule(config_manager)
-    result = ChecklistRunner(scheduled_config).run()
+    # The primary schedule is authoritative for the full configured checklist.
+    # Module-specific schedules add extra occurrences and never remove targets.
+    result = ChecklistRunner(config_manager).run()
     deleted = 0
     if result.get("status") == "Completed":
         backup_path = Path(str(result.get("backup_path", ""))) if result.get("backup_path") else None

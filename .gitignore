@@ -20,7 +20,11 @@ __pycache__/
 !/backups/.gitkeep
 /queue/
 /service/health.json
+/service/*.lock
 /history.json
+/history.json.lock
+/config/*.lock
+/queue/*.lock
 /support_checklist.lock
 
 # Machine-specific configuration can contain credentials and local paths

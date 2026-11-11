@@ -1,6 +1,6 @@
 # MiChecklist
 
-Current product version: **1.0.0.8**.
+Current product version: **1.0.0.13**.
 
 MiChecklist is a Windows desktop and service application for automated
 support checklists, backups, cleanup, monitoring, and recovery.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 
 from .encryption import decrypt_password, encrypt_password
 from .paths import get_app_dir
+from .process_lock import process_lock
 
 
 DEFAULT_CONFIG = {
@@ -31,6 +33,7 @@ DEFAULT_CONFIG = {
         "use_tls": True,
         "username": "millensysnotifications@gmail.com",
         "sender_name": "MiChecklist",
+        "subject_template": "[{company} {product}] {status} - {job_type}",
         "client_name": "",
         "client_branch": "",
         "client_server": "",
@@ -42,6 +45,7 @@ DEFAULT_CONFIG = {
         "notify_warning": True,
         "notify_failure": True,
         "notify_recovery": True,
+        "notify_module_success": False,
     },
     "service": {
         "poll_seconds": 5,
@@ -153,6 +157,10 @@ class ConfigManager:
 
     def load_config(self, create_if_missing: bool = True) -> None:
         """Load configuration from JSON and decrypt sensitive values."""
+        with process_lock(self.config_path):
+            self._load_config_locked(create_if_missing)
+
+    def _load_config_locked(self, create_if_missing: bool = True) -> None:
         if not self.config_path.exists():
             if not create_if_missing:
                 raise ConfigError(
@@ -178,8 +186,11 @@ class ConfigManager:
             if password:
                 try:
                     section["password"] = decrypt_password(password)
-                except Exception:
-                    section["password"] = ""
+                except Exception as exc:
+                    raise ConfigError(
+                        f"Unable to decrypt the saved {section_name.replace('_', ' ')} password. "
+                        "Re-enter the credential and save the configuration."
+                    ) from exc
 
         migrated_external = migrate_external_destination(self.data)
         if apply_missing_defaults(self.data, DEFAULT_CONFIG) or migrated_external:
@@ -199,18 +210,30 @@ class ConfigManager:
 
     def save_config(self) -> None:
         """Save configuration to JSON, encrypting sensitive values."""
-        output_data = deepcopy(self.data)
-        try:
-            for section_name in ("sql_server", "email"):
-                section = output_data.setdefault(section_name, {})
-                password = section.get("password", "")
-                if password:
-                    section["password"] = encrypt_password(password)
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_path, "w", encoding="utf-8") as handle:
-                json.dump(output_data, handle, indent=4)
-        except Exception as exc:
-            raise ConfigError(f"Unable to save configuration: {exc}") from exc
+        with process_lock(self.config_path):
+            output_data = deepcopy(self.data)
+            temporary = None
+            try:
+                for section_name in ("sql_server", "email"):
+                    section = output_data.setdefault(section_name, {})
+                    password = section.get("password", "")
+                    if password:
+                        section["password"] = encrypt_password(password)
+                self.config_path.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    "w", encoding="utf-8", dir=self.config_path.parent,
+                    prefix="config-", suffix=".tmp", delete=False,
+                ) as handle:
+                    json.dump(output_data, handle, indent=4)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    temporary = Path(handle.name)
+                os.replace(temporary, self.config_path)
+            except Exception as exc:
+                raise ConfigError(f"Unable to save configuration: {exc}") from exc
+            finally:
+                if temporary and temporary.exists():
+                    temporary.unlink()
 
     def get(self, section: str, key: str, default: Any = None) -> Any:
         return self.data.get(section, {}).get(key, default)

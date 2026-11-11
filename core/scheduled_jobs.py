@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from functools import wraps
 from calendar import monthrange
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,15 @@ from uuid import uuid4
 
 from core.job_queue import PersistentJobQueue
 from utils.paths import get_app_dir
+from utils.process_lock import process_lock
+
+
+def _locked_store(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with process_lock(self.path):
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 class ScheduledJobStore:
@@ -20,6 +30,7 @@ class ScheduledJobStore:
         self.path = path or queue_dir / "saved_jobs.json"
         self.legacy_path = queue_dir / "schedules.json" if path is None else None
 
+    @_locked_store
     def load(self) -> list[dict]:
         self._migrate_legacy_file()
         if not self.path.exists():
@@ -45,6 +56,7 @@ class ScheduledJobStore:
         except FileNotFoundError:
             pass
 
+    @_locked_store
     def save(self, schedules: list[dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = None
@@ -62,6 +74,7 @@ class ScheduledJobStore:
             if temporary and temporary.exists():
                 temporary.unlink()
 
+    @_locked_store
     def add(self, name: str, job_type: str, payload: dict, schedule: dict) -> str:
         schedules = self.load()
         schedule_id = uuid4().hex
@@ -86,6 +99,43 @@ class ScheduledJobStore:
         self.save(schedules)
         return schedule_id
 
+    @_locked_store
+    def upsert_module(self, module: str, name: str, schedule: dict) -> str:
+        """Create or replace the single tab-level schedule for a module."""
+        schedules = self.load()
+        existing = next(
+            (
+                item for item in schedules
+                if item.get("job_type") == "module_schedule"
+                and item.get("payload", {}).get("module") == module
+            ),
+            None,
+        )
+        schedule_id = str(existing.get("id")) if existing else uuid4().hex
+        record = {
+            "id": schedule_id,
+            "name": name,
+            "job_type": "module_schedule",
+            "payload": {"module": module, "module_scope": module},
+            "enabled": bool(schedule.get("enabled", True)),
+            "frequency": schedule.get("frequency", "daily"),
+            "time": schedule.get("time", "02:00"),
+            "weekdays": schedule.get("weekdays", []),
+            "interval_days": max(1, int(schedule.get("interval_days", 1))),
+            "interval_minutes": max(1, int(schedule.get("interval_minutes", 15))),
+            "day_of_month": min(31, max(1, int(schedule.get("day_of_month", 1)))),
+            "run_missed": bool(schedule.get("run_missed", True)),
+            "last_enqueued_for": existing.get("last_enqueued_for", "") if existing else "",
+            "last_run": existing.get("last_run", "") if existing else "",
+            "next_run": "",
+            "created_at": existing.get("created_at", datetime.now().isoformat(timespec="seconds")) if existing else datetime.now().isoformat(timespec="seconds"),
+        }
+        schedules = [item for item in schedules if item.get("id") != schedule_id]
+        schedules.append(record)
+        self.save(schedules)
+        return schedule_id
+
+    @_locked_store
     def delete(self, schedule_id: str) -> bool:
         schedules = self.load()
         remaining = [item for item in schedules if item.get("id") != schedule_id]
@@ -97,13 +147,17 @@ class ScheduledJobStore:
     @staticmethod
     def _scheduled_occurrence(item: dict, now: datetime) -> datetime | None:
         try:
+            created = datetime.fromisoformat(str(item.get("created_at", now.isoformat())))
+        except ValueError:
+            created = now
+        try:
             hour, minute = (int(value) for value in str(item.get("time", "02:00")).split(":"))
         except (TypeError, ValueError):
             hour, minute = 2, 0
         today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         frequency = item.get("frequency", "daily")
         if frequency == "minutes":
-            created = datetime.fromisoformat(item.get("created_at", now.isoformat())).replace(microsecond=0)
+            created = created.replace(microsecond=0)
             interval = max(1, int(item.get("interval_minutes", 15)))
             if created > now:
                 return None
@@ -114,28 +168,32 @@ class ScheduledJobStore:
             day = min(requested_day, monthrange(now.year, now.month)[1])
             candidate = today.replace(day=day)
             if candidate <= now:
-                return candidate
+                return candidate if candidate >= created else None
             previous_month = now.month - 1 or 12
             previous_year = now.year if now.month > 1 else now.year - 1
             previous_day = min(requested_day, monthrange(previous_year, previous_month)[1])
-            return candidate.replace(year=previous_year, month=previous_month, day=previous_day)
+            candidate = candidate.replace(year=previous_year, month=previous_month, day=previous_day)
+            return candidate if candidate >= created else None
         if frequency == "weekly":
             weekdays = {str(day).lower() for day in item.get("weekdays", [])}
             for days_back in range(8):
                 candidate = today - timedelta(days=days_back)
                 if candidate.strftime("%A").lower() in weekdays and candidate <= now:
-                    return candidate
+                    return candidate if candidate >= created else None
             return None
         if frequency == "interval":
-            created = datetime.fromisoformat(item.get("created_at", now.isoformat()))
             interval = max(1, int(item.get("interval_days", 1)))
             first = created.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if first < created:
+                first += timedelta(days=interval)
             if first > now:
                 return None
             elapsed_days = max(0, (now.date() - first.date()).days)
             return first + timedelta(days=(elapsed_days // interval) * interval)
-        return today if today <= now else today - timedelta(days=1)
+        candidate = today if today <= now else today - timedelta(days=1)
+        return candidate if candidate >= created else None
 
+    @_locked_store
     def enqueue_due(
         self,
         queue: PersistentJobQueue,
@@ -169,6 +227,23 @@ class ScheduledJobStore:
                 item["last_enqueued_for"] = occurrence_key
                 changed = True
                 continue
+            # The primary checklist includes every configured module. When a
+            # module schedule collides with it, the primary occurrence satisfies
+            # the module schedule and avoids duplicate backup/cleanup work.
+            if item.get("job_type") == "module_schedule":
+                collision = any(
+                    job.get("type") == "checklist"
+                    and job.get("status") in {"queued", "running", "completed"}
+                    and self._within_collision_window(
+                        job.get("payload", {}).get("scheduled_for"), occurrence, minutes=10,
+                    )
+                    for job in queue.load()
+                )
+                if collision:
+                    item["last_enqueued_for"] = occurrence_key
+                    item["last_run"] = current.isoformat(timespec="seconds")
+                    changed = True
+                    continue
             payload = dict(item.get("payload", {}))
             payload.update({"schedule_id": item["id"], "scheduled_for": occurrence_key})
             queue.enqueue(str(item.get("job_type")), payload)
@@ -179,3 +254,11 @@ class ScheduledJobStore:
         if changed:
             self.save(schedules)
         return queued
+
+    @staticmethod
+    def _within_collision_window(value: object, occurrence: datetime, minutes: int) -> bool:
+        try:
+            scheduled = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return False
+        return abs((scheduled - occurrence).total_seconds()) <= minutes * 60

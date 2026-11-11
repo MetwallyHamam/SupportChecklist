@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import os
 import re
-from pathlib import Path
 
 
 def classify_storage_path(value: str) -> str:

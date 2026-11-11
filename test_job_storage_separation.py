@@ -89,3 +89,17 @@ def test_interrupted_manual_checklist_requires_manual_retry(tmp_path):
 
     recovered = next(job for job in queue.load() if job["id"] == job_id)
     assert recovered["status"] == "failed"
+
+
+def test_queue_prunes_old_terminal_jobs_but_keeps_active_work(tmp_path):
+    queue = PersistentJobQueue(tmp_path / "job_executions.json")
+    for index in range(5):
+        job_id = queue.enqueue("cleanup", {"index": index})
+        queue.claim_next()
+        queue.finish(job_id, "completed")
+    active_id = queue.enqueue("checklist", {})
+
+    assert queue.prune_terminal(keep=2) == 3
+    jobs = queue.load()
+    assert len([job for job in jobs if job["status"] == "completed"]) == 2
+    assert any(job["id"] == active_id and job["status"] == "queued" for job in jobs)

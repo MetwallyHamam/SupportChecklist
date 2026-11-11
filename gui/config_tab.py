@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from modules.sql_backup import SQLBackup
+from modules.iis_selection import site_child_selection
 from core.scheduled_jobs import ScheduledJobStore
 from utils.config_manager import ConfigError, ConfigManager
 from utils.email_validation import invalid_millensys_addresses, parse_addresses
@@ -40,10 +41,12 @@ class ConfigTab(QWidget):
         self.config_manager = config_manager
         self._iis_tables_loaded = False
         self._loading_iis_tables = False
+        self._applying_iis_site_rules = False
         self._services_loaded = False
         self._cleanup_detection_thread: QThread | None = None
         self._cleanup_detection_worker = None
         self._cleanup_detection_source = ""
+        self._cleanup_detection_automatic = False
 
         self.layout = QVBoxLayout(self)
         self.setLayout(self.layout)
@@ -93,6 +96,12 @@ class ConfigTab(QWidget):
         self.email_tls = QCheckBox("Use STARTTLS")
         self.email_username = QLineEdit()
         self.email_sender_name = QLineEdit()
+        self.email_subject_template = QLineEdit()
+        self.email_subject_template.setPlaceholderText("[{company} {product}] {status} - {job_type}")
+        self.email_subject_template.setToolTip(
+            "Available fields: {company}, {product}, {status}, {job_type}, {client}, "
+            "{branch}, {server}, {job_id}, {date}"
+        )
         self.email_client_name = QLineEdit()
         self.email_client_branch = QLineEdit()
         self.email_client_server = QLineEdit()
@@ -106,6 +115,7 @@ class ConfigTab(QWidget):
         self.email_warning = QCheckBox("Notify when a job completes with warnings")
         self.email_failure = QCheckBox("Notify after failed jobs")
         self.email_recovery = QCheckBox("Notify when an interrupted job is recovered and restarted")
+        self.email_module_success = QCheckBox("Notify after successful module-specific schedules")
 
         self.server_input = QLineEdit()
         self.sql_backup_enabled_checkbox = QCheckBox("Enable Database Backup")
@@ -138,6 +148,7 @@ class ConfigTab(QWidget):
         self.iis_pools_table = QTableWidget(0, 3)
 
         self.db_refresh_button = QPushButton("Refresh Databases")
+        self.schedule_database_module_button = QPushButton("Schedule Database Tab")
         self.db_table = QTableWidget(0, 3)
 
         self.service_backup_enabled_checkbox = QCheckBox("Enable Windows Service Backup")
@@ -147,6 +158,7 @@ class ConfigTab(QWidget):
         self.service_select_all_button = QPushButton("Select All")
         self.service_deselect_all_button = QPushButton("Deselect All")
         self.schedule_service_button = QPushButton("Schedule Selected Service")
+        self.schedule_services_module_button = QPushButton("Schedule Services Tab")
         self.service_table = QTableWidget(0, 5)
         self.save_service_settings_button = QPushButton("Save Service Settings")
 
@@ -155,6 +167,7 @@ class ConfigTab(QWidget):
         self.edit_folder_button = QPushButton("Edit Folder")
         self.toggle_folder_button = QPushButton("Enable / Disable")
         self.schedule_folder_button = QPushButton("Schedule Selected Folder")
+        self.schedule_folders_module_button = QPushButton("Schedule Folders Tab")
         self.remove_folder_button = QPushButton("Remove Folder")
         self.cleanup_enabled_checkbox = QCheckBox("Enable Cleanup Tasks")
         self.cleanup_detect_button = QPushButton("Auto Detect from Selected IIS Apps")
@@ -162,6 +175,8 @@ class ConfigTab(QWidget):
         self.cleanup_add_button = QPushButton("Add Cleanup Task")
         self.cleanup_edit_button = QPushButton("Edit Cleanup Task")
         self.cleanup_remove_button = QPushButton("Remove Cleanup Task")
+        self.schedule_cleanup_module_button = QPushButton("Schedule Cleanup Tab")
+        self.schedule_iis_module_button = QPushButton("Schedule IIS Tab")
         self.cleanup_table = QTableWidget(0, 5)
         self.save_general_button = QPushButton("Save General Settings")
         self.save_sql_button = QPushButton("Save SQL Settings")
@@ -258,6 +273,7 @@ class ConfigTab(QWidget):
         self.db_table.setHorizontalHeaderLabels(["Select", "Database", "State"])
         self.db_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         sql_layout.addRow(self.db_table)
+        sql_layout.addRow(self.schedule_database_module_button)
         sql_layout.addRow(self.save_sql_button)
         sql_group.setLayout(sql_layout)
 
@@ -301,6 +317,7 @@ class ConfigTab(QWidget):
         self.iis_tabs.addTab(apps_tab, "Child Applications")
         self.iis_tabs.addTab(pools_tab, "Application Pools")
         iis_layout.addWidget(self.iis_tabs)
+        iis_layout.addWidget(self.schedule_iis_module_button)
         iis_layout.addWidget(self.save_iis_button)
         iis_group.setLayout(iis_layout)
 
@@ -320,6 +337,7 @@ class ConfigTab(QWidget):
         service_button_layout.addWidget(self.service_select_all_button)
         service_button_layout.addWidget(self.service_deselect_all_button)
         service_button_layout.addWidget(self.schedule_service_button)
+        service_button_layout.addWidget(self.schedule_services_module_button)
         service_button_layout.addWidget(self.save_service_settings_button)
         service_layout.addLayout(service_button_layout)
         service_group.setLayout(service_layout)
@@ -335,6 +353,7 @@ class ConfigTab(QWidget):
         folder_button_layout.addWidget(self.edit_folder_button)
         folder_button_layout.addWidget(self.toggle_folder_button)
         folder_button_layout.addWidget(self.schedule_folder_button)
+        folder_button_layout.addWidget(self.schedule_folders_module_button)
         folder_button_layout.addWidget(self.remove_folder_button)
         folder_layout.addLayout(folder_button_layout)
         folder_layout.addWidget(self.save_folders_button)
@@ -355,6 +374,7 @@ class ConfigTab(QWidget):
         cleanup_button_layout.addWidget(self.cleanup_remove_button)
         cleanup_layout.addLayout(cleanup_button_layout)
         cleanup_layout.addWidget(self.save_cleanup_button)
+        cleanup_layout.addWidget(self.schedule_cleanup_module_button)
         cleanup_layout.addWidget(self.run_cleanup_button)
         cleanup_group.setLayout(cleanup_layout)
 
@@ -414,6 +434,7 @@ class ConfigTab(QWidget):
         notification_layout.addRow(self.email_tls)
         notification_layout.addRow("Username:", self.email_username)
         notification_layout.addRow("Sender name:", self.email_sender_name)
+        notification_layout.addRow("Subject template:", self.email_subject_template)
         notification_layout.addRow("App password:", self.email_password)
         notification_layout.addRow("To (comma separated):", self.email_to)
         notification_layout.addRow("Cc (comma separated):", self.email_cc)
@@ -421,6 +442,7 @@ class ConfigTab(QWidget):
         notification_layout.addRow(self.email_warning)
         notification_layout.addRow(self.email_failure)
         notification_layout.addRow(self.email_recovery)
+        notification_layout.addRow(self.email_module_success)
         client_info_group = QGroupBox("Client Information")
         client_info_layout = QFormLayout(client_info_group)
         client_info_layout.addRow("Client name:", self.email_client_name)
@@ -591,6 +613,11 @@ class ConfigTab(QWidget):
         self.schedule_iis_site_button.clicked.connect(self.on_schedule_iis_site)
         self.schedule_iis_app_button.clicked.connect(self.on_schedule_iis_application)
         self.schedule_service_button.clicked.connect(self.on_schedule_service)
+        self.schedule_database_module_button.clicked.connect(lambda: self._schedule_module("database"))
+        self.schedule_iis_module_button.clicked.connect(lambda: self._schedule_module("iis"))
+        self.schedule_services_module_button.clicked.connect(lambda: self._schedule_module("services"))
+        self.schedule_folders_module_button.clicked.connect(lambda: self._schedule_module("folders"))
+        self.schedule_cleanup_module_button.clicked.connect(lambda: self._schedule_module("cleanup"))
         self.remove_folder_button.clicked.connect(self.on_remove_folder)
         self.save_general_button.clicked.connect(self.on_save_general_clicked)
         self.save_sql_button.clicked.connect(self.on_save_sql_clicked)
@@ -678,6 +705,9 @@ class ConfigTab(QWidget):
         self.email_tls.setChecked(bool(email.get("use_tls", True)))
         self.email_username.setText(str(email.get("username", "")))
         self.email_sender_name.setText(str(email.get("sender_name", "Support Checklist")))
+        self.email_subject_template.setText(str(email.get(
+            "subject_template", "[{company} {product}] {status} - {job_type}"
+        )))
         self.email_client_name.setText(str(email.get("client_name", "")))
         self.email_client_branch.setText(str(email.get("client_branch", "")))
         self.email_client_server.setText(str(email.get("client_server", "")))
@@ -689,6 +719,7 @@ class ConfigTab(QWidget):
         self.email_warning.setChecked(bool(email.get("notify_warning", True)))
         self.email_failure.setChecked(bool(email.get("notify_failure", True)))
         self.email_recovery.setChecked(bool(email.get("notify_recovery", True)))
+        self.email_module_success.setChecked(bool(email.get("notify_module_success", False)))
 
         sql = self.config_manager.get_section("sql_server")
         self.sql_backup_enabled_checkbox.setChecked(bool(sql.get("backup_enabled", True)))
@@ -862,21 +893,115 @@ class ConfigTab(QWidget):
             self._iis_tables_loaded = True
         finally:
             self._loading_iis_tables = False
+        if self._apply_iis_site_child_rules():
+            self.save_iis_settings()
+            self.config_manager.save_config()
+            self.save_status_label.setText(
+                "External IIS child apps were selected for backup and cleanup automatically."
+            )
 
     def on_iis_selection_changed(self, item: QTableWidgetItem) -> None:
         """Persist IIS checkbox selections immediately so service runs match the UI."""
-        if self._loading_iis_tables or not self._iis_tables_loaded:
+        if self._loading_iis_tables or self._applying_iis_site_rules or not self._iis_tables_loaded:
             return
         table = self.sender()
         checkbox_column = item.column() in {0, 1} if table is self.iis_apps_table else item.column() == 0
         if not checkbox_column:
             return
         try:
+            if table is self.iis_sites_table:
+                self._clear_deselected_site_children()
+                self._apply_iis_site_child_rules()
             self.save_iis_settings()
             self.config_manager.save_config()
             self.save_status_label.setText("IIS selection saved automatically.")
         except (ConfigError, ValueError) as exc:
             self.save_status_label.setText(f"Unable to save IIS selection: {exc}")
+
+    def _clear_deselected_site_children(self) -> None:
+        previous_sites = set(self.config_manager.get("iis", "selected_sites", []) or [])
+        current_sites = {
+            self.iis_sites_table.item(row, 1).text()
+            for row in range(self.iis_sites_table.rowCount())
+            if self.iis_sites_table.item(row, 0)
+            and self.iis_sites_table.item(row, 1)
+            and self.iis_sites_table.item(row, 0).checkState() == Qt.Checked
+        }
+        removed_sites = previous_sites - current_sites
+        if not removed_sites:
+            return
+        self._applying_iis_site_rules = True
+        try:
+            for row in range(self.iis_apps_table.rowCount()):
+                path_item = self.iis_apps_table.item(row, 4)
+                key = str(path_item.data(Qt.UserRole) or "") if path_item else ""
+                site = key.split("|", 1)[0]
+                if site in removed_sites:
+                    self.iis_apps_table.item(row, 0).setCheckState(Qt.Unchecked)
+                    self.iis_apps_table.item(row, 1).setCheckState(Qt.Unchecked)
+        finally:
+            self._applying_iis_site_rules = False
+        retained_tasks = []
+        for task in self.config_manager.get("cleanup", "tasks", []) or []:
+            if task.get("source") != "IIS Auto Detect":
+                retained_tasks.append(task)
+                continue
+            owner = str(task.get("owner_key", ""))
+            name = str(task.get("name", ""))
+            if not any(
+                owner.startswith(f"{site}|") or name.startswith(f"{site} >")
+                for site in removed_sites
+            ):
+                retained_tasks.append(task)
+        self.config_manager.set("cleanup", "tasks", retained_tasks)
+        self.load_cleanup_table()
+
+    def _apply_iis_site_child_rules(self) -> bool:
+        """Auto-select external child apps and discover their cleanup folders."""
+        if self._applying_iis_site_rules:
+            return False
+        selected_sites: dict[str, str] = {}
+        for row in range(self.iis_sites_table.rowCount()):
+            check_item = self.iis_sites_table.item(row, 0)
+            name_item = self.iis_sites_table.item(row, 1)
+            if check_item and name_item and check_item.checkState() == Qt.Checked:
+                selected_sites[name_item.text()] = str(name_item.data(Qt.UserRole) or "")
+        applications: list[dict[str, str]] = []
+        rows_by_key: dict[str, int] = {}
+        for row in range(self.iis_apps_table.rowCount()):
+            path_item = self.iis_apps_table.item(row, 4)
+            if not path_item:
+                continue
+            key = str(path_item.data(Qt.UserRole) or "")
+            site, app_path = (key.split("|", 1) + [""])[:2]
+            applications.append({
+                "site": site,
+                "path": app_path,
+                "physical_path": path_item.text(),
+            })
+            rows_by_key[key] = row
+        selection = site_child_selection(selected_sites, applications)
+        if not selected_sites:
+            for row in range(self.iis_apps_table.rowCount()):
+                self.iis_apps_table.setRowHidden(row, False)
+            return False
+        self._applying_iis_site_rules = True
+        try:
+            for key, row in rows_by_key.items():
+                self.iis_apps_table.setRowHidden(row, key not in selection.visible_keys)
+                if key in selection.visible_keys:
+                    self.iis_apps_table.item(row, 0).setCheckState(
+                        Qt.Checked if key in selection.backup_keys else Qt.Unchecked
+                    )
+                    self.iis_apps_table.item(row, 1).setCheckState(Qt.Checked)
+            self.cleanup_enabled_checkbox.setChecked(True)
+            self._start_cleanup_detection(
+                "iis", set(selection.cleanup_keys),
+                folder_names="Exception, Exceptions, Logs", automatic=True,
+            )
+        finally:
+            self._applying_iis_site_rules = False
+        return True
 
     def load_folder_table(self) -> None:
         folders = self.config_manager.get("folder_backup", "folders", [])
@@ -919,24 +1044,29 @@ class ConfigTab(QWidget):
             return
         self._start_cleanup_detection("services", selected_services)
 
-    def _start_cleanup_detection(self, source: str, selected_items: set[str]) -> None:
+    def _start_cleanup_detection(
+        self, source: str, selected_items: set[str],
+        folder_names: str | None = None, automatic: bool = False,
+    ) -> None:
         from modules.cleanup_manager import normalize_folder_names
         from modules.cleanup_detection_worker import CleanupDetectionWorker
 
-        folder_names, ok = QInputDialog.getText(
-            self,
-            "Cleanup Auto Detect",
-            "Folder names to detect, separated by commas:",
-            text="Exception, logs",
-        )
-        if not ok:
-            return
+        if folder_names is None:
+            folder_names, ok = QInputDialog.getText(
+                self,
+                "Cleanup Auto Detect",
+                "Folder names to detect, separated by commas:",
+                text="Exception, logs",
+            )
+            if not ok:
+                return
         if not normalize_folder_names(folder_names):
             QMessageBox.warning(self, "Cleanup Auto Detect", "Configure at least one folder name to detect.")
             return
         if self._cleanup_detection_thread and self._cleanup_detection_thread.isRunning():
             return
         self._cleanup_detection_source = source
+        self._cleanup_detection_automatic = automatic
         self.cleanup_detect_button.setEnabled(False)
         self.cleanup_detect_services_button.setEnabled(False)
         self.cleanup_detect_button.setText("Detecting Cleanup Folders...")
@@ -958,9 +1088,18 @@ class ConfigTab(QWidget):
             if task.get("source", "Manual") != replaced_source
         ]
         self.config_manager.set("cleanup", "tasks", manual_tasks + detected_tasks)
+        if detected_tasks:
+            self.config_manager.set("cleanup", "enabled", True)
+            self.cleanup_enabled_checkbox.setChecked(True)
+        self.config_manager.save_config()
         self.load_cleanup_table()
-        self.show_unsaved_status("Cleanup changes")
-        QMessageBox.information(self, "Cleanup Auto Detect", f"Detected {len(detected_tasks)} cleanup folders.")
+        if self._cleanup_detection_automatic:
+            self.save_status_label.setText(
+                f"Selected IIS children and detected {len(detected_tasks)} cleanup folders automatically."
+            )
+        else:
+            self.show_unsaved_status("Cleanup changes")
+            QMessageBox.information(self, "Cleanup Auto Detect", f"Detected {len(detected_tasks)} cleanup folders.")
 
     def on_cleanup_detection_failed(self, error: str) -> None:
         QMessageBox.warning(self, "Cleanup Auto Detect", f"Unable to inspect IIS application paths: {error}")
@@ -972,6 +1111,7 @@ class ConfigTab(QWidget):
         self._cleanup_detection_worker = None
         self._cleanup_detection_thread = None
         self._cleanup_detection_source = ""
+        self._cleanup_detection_automatic = False
 
     def on_add_cleanup_task(self) -> None:
         from modules.cleanup_manager import DEFAULT_LOG_EXTENSIONS, normalize_extensions
@@ -1265,6 +1405,113 @@ class ConfigTab(QWidget):
             self, "Backup Job Scheduled",
             f"{name} now has an independent {frequency} schedule.\n"
             f"Schedule ID: {schedule_id[:12]}\n\nReview or remove it from Operations.",
+        )
+
+    def _schedule_module(self, module: str) -> None:
+        labels = {
+            "cleanup": "Cleanup",
+            "iis": "IIS",
+            "services": "Services",
+            "database": "Database",
+            "folders": "Folders",
+        }
+        label = labels[module]
+        has_targets = {
+            "cleanup": bool(
+                self.config_manager.get("cleanup", "enabled", False)
+                and any(
+                    item.get("enabled", True)
+                    for item in self.config_manager.get("cleanup", "tasks", [])
+                )
+            ),
+            "iis": bool(
+                self.config_manager.get("iis", "backup_enabled", True)
+                and (
+                    self.config_manager.get("iis", "selected_sites", [])
+                    or self.config_manager.get("iis", "selected_apps", [])
+                )
+            ),
+            "services": bool(
+                self.config_manager.get("services", "backup_enabled", True)
+                and self.config_manager.get("services", "selected_services", [])
+            ),
+            "database": bool(
+                self.config_manager.get("sql_server", "backup_enabled", True)
+                and (
+                    self.config_manager.get("sql_server", "databases", [])
+                    or str(self.config_manager.get("sql_server", "database_name", "")).strip()
+                )
+            ),
+            "folders": any(
+                item.get("enabled", True)
+                for item in self.config_manager.get("folder_backup", "folders", [])
+            ),
+        }[module]
+        if not has_targets:
+            QMessageBox.warning(
+                self,
+                f"Schedule {label} Tab",
+                f"Enable and save at least one {label} item before creating its schedule.",
+            )
+            return
+        frequency, accepted = QInputDialog.getItem(
+            self, f"Schedule {label} Tab", "Frequency",
+            ["daily", "weekly", "monthly", "interval"], 0, False,
+        )
+        if not accepted:
+            return
+        run_time, accepted = QInputDialog.getText(
+            self, f"Schedule {label} Tab", "Start time (HH:mm)", text="02:00",
+        )
+        if not accepted:
+            return
+        if not QTime.fromString(run_time, "HH:mm").isValid():
+            QMessageBox.warning(self, f"Schedule {label} Tab", "Enter time as HH:mm, for example 02:00.")
+            return
+        weekdays: list[str] = []
+        interval_days = 1
+        day_of_month = 1
+        if frequency == "weekly":
+            weekday, accepted = QInputDialog.getItem(
+                self, f"Schedule {label} Tab", "Weekday",
+                ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+                0, False,
+            )
+            if not accepted:
+                return
+            weekdays = [weekday]
+        elif frequency == "monthly":
+            day_of_month, accepted = QInputDialog.getInt(
+                self, f"Schedule {label} Tab", "Day of month", 1, 1, 31,
+            )
+            if not accepted:
+                return
+        elif frequency == "interval":
+            interval_days, accepted = QInputDialog.getInt(
+                self, f"Schedule {label} Tab", "Run every N days", 7, 1, 365,
+            )
+            if not accepted:
+                return
+        schedule_id = ScheduledJobStore().upsert_module(
+            module,
+            f"{label} tab schedule",
+            {
+                "enabled": True,
+                "frequency": frequency,
+                "time": run_time,
+                "weekdays": weekdays,
+                "interval_days": interval_days,
+                "day_of_month": day_of_month,
+                "run_missed": True,
+            },
+        )
+        QMessageBox.information(
+            self,
+            f"{label} Tab Scheduled",
+            f"All enabled items in the {label} tab will run on this {frequency} schedule.\n"
+            f"Schedule ID: {schedule_id[:12]}\n\n"
+            "The primary checklist still includes this module. If both schedules occur within "
+            "10 minutes, only the primary checklist runs it.",
         )
 
     def on_schedule_iis_site(self) -> None:
@@ -1648,6 +1895,10 @@ class ConfigTab(QWidget):
         self.config_manager.set("email", "use_tls", self.email_tls.isChecked())
         self.config_manager.set("email", "username", self.email_username.text().strip())
         self.config_manager.set("email", "sender_name", self.email_sender_name.text().strip() or "Support Checklist")
+        self.config_manager.set(
+            "email", "subject_template",
+            self.email_subject_template.text().strip() or "[{company} {product}] {status} - {job_type}",
+        )
         self.config_manager.set("email", "client_name", self.email_client_name.text().strip())
         self.config_manager.set("email", "client_branch", self.email_client_branch.text().strip())
         self.config_manager.set("email", "client_server", self.email_client_server.text().strip())
@@ -1659,6 +1910,7 @@ class ConfigTab(QWidget):
         self.config_manager.set("email", "notify_warning", self.email_warning.isChecked())
         self.config_manager.set("email", "notify_failure", self.email_failure.isChecked())
         self.config_manager.set("email", "notify_recovery", self.email_recovery.isChecked())
+        self.config_manager.set("email", "notify_module_success", self.email_module_success.isChecked())
 
     def save_sql_settings(self) -> None:
         self.config_manager.set("sql_server", "backup_enabled", self.sql_backup_enabled_checkbox.isChecked())
